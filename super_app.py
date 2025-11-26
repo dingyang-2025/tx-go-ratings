@@ -178,28 +178,7 @@ def get_rival_analysis(player_name, df):
         })
     return results
 
-# AI 自由对话
-def ask_ai_general(query, ratings, df):
-    if not API_KEY or "sk-" not in API_KEY: return "⚠️ 请填写 API Key"
-    full_stats = get_comprehensive_stats(ratings, df)
-    recent_text = ""
-    target_games = df.sort_values('Date', ascending=False).head(200)
-    for _, row in target_games.iterrows():
-        recent_text += f"{row['Date'].strftime('%Y-%m-%d')} | {row['Black']} vs {row['White']} | {row['Winner']}胜\n"
-    
-    prompt = f"""
-    你是公司围棋数据分析师。请结合【宏观统计】和【近期对局日志】回答用户问题。
-    === 📊 宏观统计 (生涯总览) ===
-    {full_stats}
-    === 📜 近期对局日志 (最近200局) ===
-    {recent_text}
-    用户问题：{query}
-    """
-    try:
-        client = OpenAI(api_key=API_KEY)
-        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-        return res.choices[0].message.content
-    except Exception as e: return str(e)
+
 
 # --- 4. 界面主逻辑 ---
 st.set_page_config(page_title="公司围棋大脑", layout="wide")
