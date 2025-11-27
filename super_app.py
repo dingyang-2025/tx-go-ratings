@@ -76,33 +76,29 @@ def calculate_ratings(df, initial_rating=1500, k_factor=32):
 
     # 2. 遍历每一行比赛数据
     for index, row in df.iterrows():
-        # 获取人名并去除首尾空格（防止 "张三 " != "张三" 的情况）
+        # 获取人名并去除首尾空格
         p1 = str(row['Player1']).strip()
         p2 = str(row['Player2']).strip()
         winner = str(row['Winner']).strip()
         date = row['Date']
 
-        # --- 【修复核心】：自动初始化新选手 ---
-        # 如果选手字典里还没有这个人，直接给初始分 1500
+        # --- 自动初始化新选手 ---
         if p1 not in ratings:
             ratings[p1] = initial_rating
         if p2 not in ratings:
             ratings[p2] = initial_rating
         
-        # 更新活跃时间
         last_active[p1] = date
         last_active[p2] = date
 
         # --- 数据完整性检查 ---
-        # 如果 Winner 是空的，或者是平局，或者Winner不在参赛者中
         if winner not in [p1, p2]:
-            # print(f"警告：第 {index} 行数据异常，胜者 {winner} 不在选手 [{p1}, {p2}] 中，已跳过。")
             continue 
 
         # 确定败者
         loser = p2 if winner == p1 else p1
 
-        # 获取当前分数 (此时因为上面已经做了初始化，绝对不会报错 KeyError 了)
+        # 获取当前分数
         r_w = ratings[winner]
         r_l = ratings[loser]
 
@@ -117,10 +113,10 @@ def calculate_ratings(df, initial_rating=1500, k_factor=32):
         ratings[winner] = new_r_w
         ratings[loser] = new_r_l
 
-        # 记录历史
+        # 记录历史 (注意：这里已将 'Player' 改回 'Name' 以匹配你的画图代码)
         history.append({
             'Date': date,
-            'Player': winner,
+            'Name': winner,       # <--- 关键修改：兼容旧代码
             'Rating': new_r_w,
             'Opponent': loser,
             'Result': 'Win',
@@ -129,7 +125,7 @@ def calculate_ratings(df, initial_rating=1500, k_factor=32):
         })
         history.append({
             'Date': date,
-            'Player': loser,
+            'Name': loser,        # <--- 关键修改：兼容旧代码
             'Rating': new_r_l,
             'Opponent': winner,
             'Result': 'Loss',
@@ -140,6 +136,7 @@ def calculate_ratings(df, initial_rating=1500, k_factor=32):
     # 转换为 DataFrame
     history_df = pd.DataFrame(history)
     return ratings, last_active, history_df
+
 
 # --- 3. 统计分析模块 ---
 def get_rival_analysis(player_name, df):
