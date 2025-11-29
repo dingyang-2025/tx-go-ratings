@@ -452,7 +452,7 @@ with col_rank:
             display_df.columns = ['选手', '等级分', '总局数', '总胜率']
 
             # 使用 st.dataframe (可滚动)
-            st.dataframe(display_df, use_container_width=True)
+            st.dataframe(display_df, width="stretch")
 
             # 底部动态文案
             st.caption(f"注：榜单仅显示总对局数 ≥ {threshold} 局的选手。")
