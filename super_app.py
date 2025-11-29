@@ -5,6 +5,44 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+# 可选：按中文拼音排序
+try:
+    from pypinyin import lazy_pinyin  # 需要在 requirements.txt 里加 pypinyin
+except ImportError:
+    lazy_pinyin = None
+
+
+def player_sort_key(name: str):
+    """
+    选手排序规则：
+    1. 中文名字在前，按姓氏拼音排序；
+    2. 英文名字在后，按英文名排序。
+    """
+    if not name:
+        return (0, "", "")
+
+    name = str(name).strip()
+
+    # 判断是否“英文名”（全是 ASCII 字符）
+    is_english = all(ord(ch) < 128 for ch in name if not ch.isspace())
+
+    if is_english:
+        # 英文放在 group=1，最后；再按字母排序
+        return (1, name.lower(), name)
+
+    # 中文名：group=0，按姓氏拼音排
+    if lazy_pinyin is not None:
+        surname = name[0]
+        try:
+            py = lazy_pinyin(surname)[0].lower()
+        except Exception:
+            py = surname
+    else:
+        # 没装 pypinyin 时，退化为按汉字本身排序
+        py = name
+
+    return (0, py, name)
+
 # ===============================
 # 基础配置
 # ===============================
@@ -456,9 +494,12 @@ if "current_selected_player" not in st.session_state:
     st.session_state.current_selected_player = "(请选择)"
 
 with col_sel:
+    # 使用自定义的按姓氏拼音排序，英文名排最后
+    sorted_players = sorted(list(ratings.keys()), key=player_sort_key)
+
     target = st.selectbox(
         "选择选手查看详情：",
-        ["(请选择)"] + sorted(list(ratings.keys())),
+        ["(请选择)"] + sorted_players,
         key="current_selected_player",
     )
 
