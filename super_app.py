@@ -440,26 +440,105 @@ if target != "(请选择)":
         peak_score = low_score = curr_score
         peak_date = low_date = "N/A"
 
+    # ===== 1）计算名次：在总对局 ≥ 15 局选手中的等级分排名 =====
+    rank_text = "名次：—"
+    threshold_rank = 15
+    if not history_df.empty:
+        # 每个选手的总局数
+        stats_by_player = history_df.groupby("Name").agg(
+            Total_Games=("Result", "count")
+        )
+        total_games_dict = stats_by_player["Total_Games"].to_dict()
+
+        # 只保留总局数 ≥ threshold_rank 的选手
+        ranking_list = []
+        for name, rating in ratings.items():
+            tg = int(total_games_dict.get(name, 0))
+            if tg >= threshold_rank:
+                ranking_list.append(
+                    {
+                        "Name": name,
+                        "Rating": int(round(rating)),
+                        "Total_Games": tg,
+                    }
+                )
+
+        total_qualified = len(ranking_list)
+        if total_qualified > 0:
+            ranking_list_sorted = sorted(
+                ranking_list, key=lambda x: x["Rating"], reverse=True
+            )
+            rank = None
+            for idx, row in enumerate(ranking_list_sorted, start=1):
+                if row["Name"] == target:
+                    rank = idx
+                    break
+
+            if rank is not None:
+                rank_text = f"名次：第 {rank} / 共 {total_qualified} 人（≥{threshold_rank} 局）"
+            else:
+                rank_text = f"名次：未上榜（对局数 < {threshold_rank} 局）"
+    else:
+        rank_text = "名次：暂无数据"
+
     # 对手分析
     rival_data = get_rival_analysis(target, df)
-    old_rivals = sorted(rival_data, key=lambda x: x["total"], reverse=True)[:3]
+
+    # ===== 2）老对手、苦手、下手规则 =====
+    TOP_N = 5
+
+    # 老对手：按总局数降序，取前 5 个
+    old_rivals = sorted(
+        rival_data, key=lambda x: x["total"], reverse=True
+    )[:TOP_N]
+
+    # 苦手：总局数 ≥ 2 且胜率 < 50%，按「胜率升序，再按局数降序」排序
+    nemesis_candidates = [
+        r
+        for r in rival_data
+        if r["total"] >= 2 and r["win_rate"] < 50
+    ]
     nemesis = sorted(
-        [r for r in rival_data if r["total"] >= 2],
-        key=lambda x: x["win_rate"],
-    )[:3]
+        nemesis_candidates,
+        key=lambda x: (x["win_rate"], -x["total"]),
+    )[:TOP_N]
+
+    # 下手：总局数 ≥ 2 且胜率 > 50%，按「胜率降序，再按局数降序」排序
+    preys_candidates = [
+        r
+        for r in rival_data
+        if r["total"] >= 2 and r["win_rate"] > 50
+    ]
     preys = sorted(
-        [r for r in rival_data if r["total"] >= 2],
-        key=lambda x: x["win_rate"],
-        reverse=True,
-    )[:3]
+        preys_candidates,
+        key=lambda x: (-x["win_rate"], -x["total"]),
+    )[:TOP_N]
 
     with col_stats:
+        # 5 个指标
         m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("当前等级分", curr_score)
-        m2.metric("巅峰等级分", peak_score, delta=peak_date)
-        m3.metric("最低等级分", low_score, delta=low_date, delta_color="inverse")
-        m4.metric("总对局数", f"{total_games} 局")
-        m5.metric("总胜率", f"{win_rate:.1f}%")
+
+        # 在“当前等级分”下面加名次说明
+        with m1:
+            st.metric("当前等级分", curr_score)
+            st.caption(rank_text)
+
+        with m2:
+            st.metric("巅峰等级分", peak_score, delta=peak_date)
+
+        with m3:
+            st.metric(
+                "最低等级分",
+                low_score,
+                delta=low_date,
+                delta_color="inverse",
+            )
+
+        with m4:
+            st.metric("总对局数", f"{total_games} 局")
+
+        with m5:
+            st.metric("总胜率", f"{win_rate:.1f}%")
 
         st.divider()
 
@@ -481,12 +560,12 @@ if target != "(请选择)":
 
         with c_nemesis:
             st.markdown("#### ☠️ 苦手（胜率最低）")
-            st.caption("*(仅统计对局数 ≥ 2)*")
+            st.caption("*(仅统计对局数 ≥ 2，且胜率 < 50%)*")
             st.markdown(format_list(nemesis))
 
         with c_prey:
             st.markdown("#### 🍲 下手（胜率最高）")
-            st.caption("*(仅统计对局数 ≥ 2)*")
+            st.caption("*(仅统计对局数 ≥ 2，且胜率 > 50%)*")
             st.markdown(format_list(preys))
 
     st.divider()
