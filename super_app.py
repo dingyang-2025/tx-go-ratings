@@ -573,7 +573,7 @@ if target != "(请选择)":
     # 对手分析
     rival_data = get_rival_analysis(target, df)
 
-    # ===== 2）老对手、苦手、下手规则 =====
+    # ===== 2）老对手、上手、下手规则 =====
     TOP_N = 5
 
     # 老对手：按总局数降序，取前 5 个
@@ -581,7 +581,7 @@ if target != "(请选择)":
         rival_data, key=lambda x: x["total"], reverse=True
     )[:TOP_N]
 
-    # 苦手：总局数 ≥ 2 且胜率 < 50%，按「胜率升序，再按局数降序」排序
+    # 上手：总局数 ≥ 2 且胜率 < 50%，按「胜率升序，再按局数降序」排序
     nemesis_candidates = [
         r
         for r in rival_data
@@ -654,7 +654,7 @@ if target != "(请选择)":
             st.markdown(format_list(old_rivals))
 
         with c_nemesis:
-            st.markdown("#### ☠️ 苦手（胜率最低）")
+            st.markdown("#### ☠️ 上手（胜率最低）")
             st.caption("*(仅统计对局数 ≥ 2，且胜率 < 50%)*")
             st.markdown(format_list(nemesis))
 
