@@ -15,6 +15,40 @@ FILE_PATH = os.path.join(BASE_DIR, "data.csv")
 
 EXPECTED_COLUMNS = ["Date", "Player1", "Player2", "Winner", "Note1", "Note2"]
 
+# ===============================
+# 荣誉标记配置（你只要改这里就行）
+# ===============================
+
+# 历届个人赛冠军名单（示例：请按真实名单填充）
+CHAMPION_PLAYERS: set[str] = {
+    # "刘博东",
+    # "彭天佐",
+    # "彭雄伟",
+    # "沈张毅",
+    # "薛义涵",
+    # "赵东易",
+    # "黄博阳",
+    # "王行健",
+    # ...
+}
+
+# “百胜”门槛
+WIN_MILESTONE = 100
+
+
+def build_badges(name: str, wins: int | None = None) -> list[str]:
+    """
+    根据名字 + 胜局数，返回要展示的徽章列表：
+    - 👑 腾冠：历届个人赛冠军
+    - 💯 百胜：胜局数 >= WIN_MILESTONE
+    """
+    badges: list[str] = []
+    if name in CHAMPION_PLAYERS:
+        badges.append("👑 腾冠")
+    if wins is not None and wins >= WIN_MILESTONE:
+        badges.append("💯 百胜")
+    return badges
+
 
 # ===============================
 # 工具函数
@@ -312,11 +346,11 @@ with col_rank:
     # --- 1. 活跃筛选按钮 ---
     # 默认勾选，定义“活跃”为近 730 天（2年）
     active_only = st.checkbox("只看活跃 (近2年)", value=True)
-    
+
     # --- 2. 计算统计数据 (总局数、胜率) ---
     stats = history_df.groupby('Name').agg(
-        Total_Games=('Result', 'count'),                   
-        Win_Count=('Result', lambda x: (x == 'Win').sum()) 
+        Total_Games=('Result', 'count'),
+        Win_Count=('Result', lambda x: (x == 'Win').sum())
     )
     # 计算胜率
     stats['Win_Rate'] = (stats['Win_Count'] / stats['Total_Games'] * 100).round(1).astype(str) + '%'
@@ -325,9 +359,9 @@ with col_rank:
     rank_data = []
     for p, r in ratings.items():
         rank_data.append({
-            'Name': p, 
+            'Name': p,
             'Rating': int(r),
-            'Last_Active': last_active.get(p) 
+            'Last_Active': last_active.get(p)
         })
     rank_df = pd.DataFrame(rank_data)
 
@@ -336,8 +370,9 @@ with col_rank:
         full_df = pd.merge(rank_df, stats, on='Name', how='left')
         full_df['Total_Games'] = full_df['Total_Games'].fillna(0).astype(int)
         full_df['Win_Rate'] = full_df['Win_Rate'].fillna('0.0%')
+        full_df['Win_Count'] = full_df['Win_Count'].fillna(0).astype(int)
 
-        # 【调整】：门槛改为 15 局
+        # 门槛：15 局
         threshold = 15
         display_df = full_df[full_df['Total_Games'] >= threshold].copy()
 
@@ -348,17 +383,27 @@ with col_rank:
             display_df = display_df[display_df['Last_Active'] >= two_years_ago]
 
         if not display_df.empty:
+            # 先为“选手”列加上徽章
+            def decorate_name(row):
+                wins = int(row.get("Win_Count", 0) or 0)
+                badges = build_badges(row["Name"], wins)
+                if not badges:
+                    return row["Name"]
+                return f"{row['Name']}  {' · '.join(badges)}"
+
+            display_df["Name"] = display_df.apply(decorate_name, axis=1)
+
             # 排序：按分数降序
             display_df = display_df.sort_values(by='Rating', ascending=False).reset_index(drop=True)
-            display_df.index += 1 
+            display_df.index += 1
 
             # 整理列名
             display_df = display_df[['Name', 'Rating', 'Total_Games', 'Win_Rate']]
             display_df.columns = ['选手', '等级分', '总局数', '总胜率']
-            
+
             # 使用 st.dataframe (可滚动)
             st.dataframe(display_df, use_container_width=True)
-            
+
             # 底部动态文案
             st.caption(f"注：榜单仅显示总对局数 ≥ {threshold} 局的选手。")
         else:
@@ -426,6 +471,9 @@ if target != "(请选择)":
     wins = len(my_games[my_games["Winner"] == target])
     win_rate = (wins / total_games * 100) if total_games > 0 else 0.0
     curr_score = int(round(ratings.get(target, 1500)))
+
+    # 当前选手的荣誉徽章
+    player_badges = build_badges(target, wins)
 
     # 历史 Elo 极值
     my_history = history_df[history_df["Name"] == target].sort_values("Date")
@@ -539,6 +587,12 @@ if target != "(请选择)":
 
         with m5:
             st.metric("总胜率", f"{win_rate:.1f}%")
+
+        # 荣誉徽章展示
+        if player_badges:
+            st.markdown(f"**荣誉标记：** {' · '.join(player_badges)}")
+        else:
+            st.caption("荣誉标记：暂无特殊称号")
 
         st.divider()
 
