@@ -406,28 +406,31 @@ st.divider()
 # ========== 选手详细档案 ==========
 st.header("🔍 选手详细档案")
 
-player_list = sorted(ratings.keys())
-selected_player = st.selectbox("选择选手查看详情:", player_list)
+# --- 1. 默认不显示，需主动选择 ---
+# 列表前加一个占位符
+all_players = sorted(ratings.keys())
+selected_player = st.selectbox("选择选手查看详情:", ["(请选择)"] + all_players)
 
-if selected_player:
-    # --- 1. 获取基础数据 ---
+if selected_player != "(请选择)":
+    # 获取该选手数据
     curr_rating = int(ratings[selected_player])
     player_history = history_df[history_df['Name'] == selected_player].copy()
     
-    # --- 2. 计算当前名次 (基于上方已经算好的 display_df) ---
-    # 逻辑：在 display_df (≥15局榜单) 里找该选手的位置
-    current_rank_display = "未上榜 (局数<15)"
+    # --- 计算名次 (基于上方 >=15 局的 display_df) ---
+    # 默认为空
+    rank_text = "" 
+    # 检查上方是否生成了 display_df 且不为空
     if 'display_df' in locals() and not display_df.empty:
-        # 查找选手是否在榜单中
+        # 在榜单里找这个人
         rank_search = display_df[display_df['选手'] == selected_player]
         if not rank_search.empty:
-            # 获取索引值 (因为索引已经是排名了)
-            rank_val = rank_search.index[0]
-            current_rank_display = f"第 {rank_val} 名"
+            # 获取排名 (index)
+            r_val = rank_search.index[0]
+            rank_text = f"第 {r_val} 名"
+        else:
+            rank_text = "未上榜"
 
-    # --- 3. 计算巅峰与最低 ---
-    # 从历史记录里提取该选手的等级分走势
-    # 注意：history_df 里存的是每一局结束后的 Rating
+    # --- 计算最高/最低分 ---
     if not player_history.empty:
         max_rating = int(player_history['Rating'].max())
         min_rating = int(player_history['Rating'].min())
@@ -435,106 +438,112 @@ if selected_player:
         max_rating = curr_rating
         min_rating = curr_rating
 
-    # --- 4. 展示顶部核心指标 (3列) ---
+    # --- 2. 还原经典布局：3个指标卡片 ---
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("当前等级分", f"{curr_rating}", delta=current_rank_display) 
-        # delta 这里的颜色默认是绿色/红色，用来显示名次很显眼
+        # 如果有名次，显示为绿色/红色的小字 (delta)
+        st.metric("当前等级分", f"{curr_rating}", delta=rank_text if rank_text else None)
     with col2:
         st.metric("历史最高", f"{max_rating}")
     with col3:
         st.metric("历史最低", f"{min_rating}")
 
-    # --- 5. 绘制个人走势图 ---
-    st.subheader("📈 个人积分走势")
-    if not player_history.empty:
-        player_history['Date'] = pd.to_datetime(player_history['Date'])
-        player_history = player_history.sort_values('Date')
-        
-        st.line_chart(player_history, x='Date', y='Rating')
-    else:
-        st.info("暂无对局记录")
+    # (已删除个人积分走势图)
 
-    # --- 6. 对手分析逻辑 (核心修改) ---
-    st.subheader("⚔️ 对手分析")
+    # --- 3. 对手分析 (纯文字列表版) ---
+    st.subheader("⚔️ 对手分析 (Top 5)")
     
     if not player_history.empty:
-        # 预计算：按对手分组，算出 (局数, 胜局数)
+        # 预计算数据
         opp_stats = player_history.groupby('Opponent').agg(
             Games=('Result', 'count'),
             Wins=('Result', lambda x: (x == 'Win').sum())
-        )
-        # 计算胜率 (小数 0.5, 1.0 等)
-        opp_stats['Win_Rate_Num'] = opp_stats['Wins'] / opp_stats['Games']
-        # 格式化胜率 (字符串 50.0%)
-        opp_stats['Win_Rate_Str'] = (opp_stats['Win_Rate_Num'] * 100).round(1).astype(str) + '%'
-
-        # --- A. 老对手 (对局数最多) ---
-        # 逻辑：只看局数，降序
-        old_rivals = opp_stats.sort_values(by='Games', ascending=False).head(5)
+        ).reset_index()
         
+        # 计算胜率 (0.0 - 1.0)
+        opp_stats['Win_Rate'] = opp_stats['Wins'] / opp_stats['Games']
+
+        # --- A. 老对手 (局数最多) ---
+        # 规则：至少 2 局，按局数降序
+        rivals = opp_stats[opp_stats['Games'] >= 2].sort_values(by='Games', ascending=False).head(5)
+
         # --- B. 苦手 (胜率 < 50%) ---
-        # 逻辑：先筛选 < 0.5
-        nemesis = opp_stats[opp_stats['Win_Rate_Num'] < 0.5].copy()
-        # 排序：先按胜率【升序】(越低越怕)，再按局数【降序】(输得越多越怕)
-        nemesis = nemesis.sort_values(by=['Win_Rate_Num', 'Games'], ascending=[True, False]).head(5)
+        # 规则：至少 2 局，胜率 < 0.5。排序：胜率升序(越低越惨) -> 局数降序(输越多越惨)
+        nemesis = opp_stats[
+            (opp_stats['Games'] >= 2) & 
+            (opp_stats['Win_Rate'] < 0.5)
+        ].sort_values(by=['Win_Rate', 'Games'], ascending=[True, False]).head(5)
 
         # --- C. 下手 (胜率 > 50%) ---
-        # 逻辑：先筛选 > 0.5
-        prey = opp_stats[opp_stats['Win_Rate_Num'] > 0.5].copy()
-        # 排序：先按胜率【降序】(越高越稳)，再按局数【降序】(赢得越多越稳)
-        prey = prey.sort_values(by=['Win_Rate_Num', 'Games'], ascending=[False, False]).head(5)
+        # 规则：至少 2 局，胜率 > 0.5。排序：胜率降序(越高越稳) -> 局数降序(赢越多越稳)
+        prey = opp_stats[
+            (opp_stats['Games'] >= 2) & 
+            (opp_stats['Win_Rate'] > 0.5)
+        ].sort_values(by=['Win_Rate', 'Games'], ascending=[False, False]).head(5)
 
-        # --- 7. 展示三张表 ---
+        # --- 展示列表 (3列布局) ---
         c1, c2, c3 = st.columns(3)
         
         with c1:
-            st.write("**🤝 老对手 (局数最多)**")
-            if not old_rivals.empty:
-                # 只展示 局数、胜率
-                st.dataframe(old_rivals[['Games', 'Win_Rate_Str']].rename(columns={'Games':'局', 'Win_Rate_Str':'率'}), use_container_width=True)
+            st.markdown("**🤝 老对手**")
+            if not rivals.empty:
+                for _, row in rivals.iterrows():
+                    # 格式：姓名 (5胜3负)
+                    wins = row['Wins']
+                    losses = row['Games'] - wins
+                    st.write(f"{row['Opponent']} ({wins}胜{losses}负)")
             else:
-                st.caption("暂无数据")
+                st.caption("暂无(需≥2局)")
 
         with c2:
-            st.write("**😨 苦手 (胜率 < 50%)**")
+            st.markdown("**😨 苦手**")
             if not nemesis.empty:
-                st.dataframe(nemesis[['Games', 'Win_Rate_Str']].rename(columns={'Games':'局', 'Win_Rate_Str':'率'}), use_container_width=True)
+                for _, row in nemesis.iterrows():
+                    wins = row['Wins']
+                    losses = row['Games'] - wins
+                    # 算出胜率百分比用于展示
+                    wr_str = f"{row['Win_Rate']*100:.0f}%"
+                    st.write(f"{row['Opponent']} ({wins}胜{losses}负)")
             else:
-                st.caption("暂无苦手 (太强了!)")
+                st.caption("暂无(需≥2局且胜率<50%)")
 
         with c3:
-            st.write("**🍰 下手 (胜率 > 50%)**")
+            st.markdown("**🍰 下手**")
             if not prey.empty:
-                st.dataframe(prey[['Games', 'Win_Rate_Str']].rename(columns={'Games':'局', 'Win_Rate_Str':'率'}), use_container_width=True)
+                for _, row in prey.iterrows():
+                    wins = row['Wins']
+                    losses = row['Games'] - wins
+                    st.write(f"{row['Opponent']} ({wins}胜{losses}负)")
             else:
-                st.caption("暂无下手")
+                st.caption("暂无(需≥2局且胜率>50%)")
 
-    else:
-        st.info("暂无对局数据，无法分析对手。")
-
-    # 个人完整对局记录
-    st.markdown(f"#### 📜 {target} 完整对局记录")
-    if not my_games.empty:
-        display_games = my_games.rename(
-            columns={
-                "Date": "日期",
-                "Player1": "选手1",
-                "Player2": "选手2",
-                "Winner": "获胜者",
-                "Note": "备注",
-            }
-        ).copy()
-        display_games["日期"] = pd.to_datetime(display_games["日期"]).dt.strftime(
-            "%Y-%m-%d"
-        )
-        cols_to_show = ["日期", "选手1", "选手2", "获胜者", "备注"]
-        st.dataframe(display_games[cols_to_show], width="stretch")
     else:
         st.info("暂无对局记录")
 
-st.divider()
+# --- 4. 恢复：全公司完整对局记录 ---
+st.markdown("---") # 分割线
+st.header("📜 全公司完整对局记录")
 
+# 按日期降序显示
+if not history_df.empty:
+    # 只展示原汁原味的对局表，去掉 User 视角的重复行，重新读取原始 Date
+    # 为了展示美观，我们直接用 df (原始读入的数据) 或 history_df 去重
+    # 这里为了方便，直接展示处理好的 history_df，但只取 Result='Win' 的行来模拟原始记录表，或者直接展示 df
+    # 最佳方案：展示处理过的 history_df，但只显示特定列
+    
+    # 简单处理：显示所有记录，按时间倒序
+    # 为了不显示两行一模一样的（A赢B，B输A），我们可以只筛选 Result='Win' 的行作为“对局记录”
+    display_history = history_df[history_df['Result'] == 'Win'].copy()
+    display_history = display_history.sort_values(by='Date', ascending=False)
+    
+    # 整理列名
+    display_history = display_history[['Date', 'Name', 'Opponent', 'Note1', 'Note2']]
+    display_history.columns = ['日期', '胜者', '败者', '赛事', '轮次']
+    
+    st.dataframe(display_history, use_container_width=True)
+else:
+    st.info("暂无数据")
+    
 # ========== 全公司完整对局记录 ==========
 st.subheader("📜 全公司完整对局记录")
 if not df.empty:
