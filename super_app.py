@@ -21,14 +21,14 @@ EXPECTED_COLUMNS = ["Date", "Player1", "Player2", "Winner", "Note1", "Note2"]
 
 # 历届个人赛冠军名单（示例：请按真实名单填充）
 CHAMPION_PLAYERS: set[str] = {
-    # "刘博东",
-    # "彭天佐",
-    # "彭雄伟",
-    # "沈张毅",
-    # "薛义涵",
-    # "赵东易",
-    # "黄博阳",
-    # "王行健",
+    "刘博东",
+    "彭天佐",
+    "彭雄伟",
+    "沈张毅",
+    "薛义涵",
+    "赵东易",
+    "黄博阳",
+    "王行健",
     # ...
 }
 
@@ -44,9 +44,9 @@ def build_badges(name: str, wins: int | None = None) -> list[str]:
     """
     badges: list[str] = []
     if name in CHAMPION_PLAYERS:
-        badges.append("👑 腾冠")
+        badges.append("👑")
     if wins is not None and wins >= WIN_MILESTONE:
-        badges.append("💯 百胜")
+        badges.append("💯")
     return badges
 
 
