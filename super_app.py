@@ -331,8 +331,20 @@ df = load_data()
 ratings, last_active, history_df = calculate_ratings(df)
 
 # 动态获选手名单（仅根据出现过的双方）
-all_known_players = set(df["Player1"].dropna().unique()) | set(df["Player2"].dropna().unique())
-known_names = sorted(n for n in all_known_players if n)
+# 先用 standardize_name 清洗，再用中文拼音 + 英文在后的规则排序
+p1_names = df["Player1"].dropna().map(standardize_name)
+p2_names = df["Player2"].dropna().map(standardize_name)
+all_known_players = set(p1_names) | set(p2_names)
+
+# 去掉空名和 'nan' 之类异常
+cleaned_players = [
+    name
+    for name in all_known_players
+    if name and str(name).strip().lower() != "nan"
+]
+
+# 使用和其它地方一致的排序规则：中文按姓氏拼音，英文排在后面
+known_names = sorted(cleaned_players, key=player_sort_key)
 
 
 # ========== 侧边栏：录入新对局 ==========
@@ -799,7 +811,7 @@ if df.empty:
     st.info("当前还没有任何对局记录。")
 else:
     # 想只维护最近多少条，可以改这个数字
-    N_RECENT = 50
+    N_RECENT = 10
 
     # 取最近 N 条对局（按日期倒序），保留原始索引，方便回写
     recent = df.sort_values("Date", ascending=False).head(N_RECENT).copy()
