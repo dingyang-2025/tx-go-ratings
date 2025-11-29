@@ -309,7 +309,7 @@ col_rank, col_trend = st.columns([1, 2])
 with col_rank:
     st.subheader("🏆 实时排行 (Top Ratings)")
 
-    # --- 1. 恢复：活跃筛选按钮 ---
+    # --- 1. 活跃筛选按钮 ---
     # 默认勾选，定义“活跃”为近 730 天（2年）
     active_only = st.checkbox("只看活跃 (近2年)", value=True)
     
@@ -318,6 +318,7 @@ with col_rank:
         Total_Games=('Result', 'count'),                   
         Win_Count=('Result', lambda x: (x == 'Win').sum()) 
     )
+    # 计算胜率
     stats['Win_Rate'] = (stats['Win_Count'] / stats['Total_Games'] * 100).round(1).astype(str) + '%'
 
     # --- 3. 准备基础数据 ---
@@ -326,7 +327,7 @@ with col_rank:
         rank_data.append({
             'Name': p, 
             'Rating': int(r),
-            'Last_Active': last_active.get(p) # 获取最后对局时间用于筛选
+            'Last_Active': last_active.get(p) 
         })
     rank_df = pd.DataFrame(rank_data)
 
@@ -336,14 +337,13 @@ with col_rank:
         full_df['Total_Games'] = full_df['Total_Games'].fillna(0).astype(int)
         full_df['Win_Rate'] = full_df['Win_Rate'].fillna('0.0%')
 
-        # 筛选 A：刚性过滤 - 去掉不足 20 局的 (你的硬性要求)
-        threshold = 20
+        # 【调整】：门槛改为 15 局
+        threshold = 15
         display_df = full_df[full_df['Total_Games'] >= threshold].copy()
 
-        # 筛选 B：柔性过滤 - 如果勾选了“只看活跃”
+        # 活跃筛选
         if active_only:
             two_years_ago = pd.Timestamp.now() - pd.DateOffset(days=730)
-            # 确保时间格式正确再比较
             display_df['Last_Active'] = pd.to_datetime(display_df['Last_Active'])
             display_df = display_df[display_df['Last_Active'] >= two_years_ago]
 
@@ -352,14 +352,14 @@ with col_rank:
             display_df = display_df.sort_values(by='Rating', ascending=False).reset_index(drop=True)
             display_df.index += 1 
 
-            # 整理列名 (去掉 Last_Active，不展示给用户看)
+            # 整理列名
             display_df = display_df[['Name', 'Rating', 'Total_Games', 'Win_Rate']]
             display_df.columns = ['选手', '等级分', '总局数', '总胜率']
             
-            # --- 5. 恢复：使用 st.dataframe (可滚动、可拖拽) ---
-            # use_container_width=True 让表格自动撑满宽度
+            # 使用 st.dataframe (可滚动)
             st.dataframe(display_df, use_container_width=True)
             
+            # 底部动态文案
             st.caption(f"注：榜单仅显示总对局数 ≥ {threshold} 局的选手。")
         else:
             st.info(f"暂无满足条件的选手（需对局 ≥ {threshold} 且在活跃期内）。")
