@@ -511,9 +511,6 @@ if target != "(请选择)":
                 rank_text = f"名次：未上榜（对局数 < {threshold_rank} 局）"
     else:
         rank_text = "名次：暂无数据"
-    
-    # 当前选手的荣誉徽章
-    player_badges = build_badges(target, wins)
 
     # 对手分析
     rival_data = get_rival_analysis(target, df)
@@ -552,17 +549,6 @@ if target != "(请选择)":
         # 5 个指标
         m1, m2, m3, m4, m5 = st.columns(5)
 
-    # 荣誉徽章
-    if player_badges:
-        st.markdown(f"**荣誉徽章：** {' · '.join(player_badges)}")
-    else:
-        # 不想显示这行可以删掉这句
-        st.caption("荣誉徽章：暂无特殊称号")
-
-    st.divider()
-
-    c_rival, c_nemesis, c_prey = st.columns(3)
-    # ...
     
         # 在“当前等级分”下面加名次说明
         with m1:
