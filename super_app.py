@@ -307,35 +307,49 @@ with st.sidebar:
 col_rank, col_trend = st.columns([1, 2])
 
 with col_rank:
-    st.subheader("🏆 实时排行")
-    active_only = st.checkbox("只看活跃（近2年）", value=True)
+    st.subheader("🏆 实时排行 (Top Ratings)")
 
-    if ratings:
-        rank_rows = []
-        now_ts = pd.Timestamp.now()
-        for name, score in ratings.items():
-            last_dt = last_active.get(name)
-            if pd.isna(last_dt):
-                continue
-            if active_only and (now_ts - last_dt).days > 730:
-                # 超过两年没下了
-                continue
-            rank_rows.append(
-                {"选手": name, "分数": int(round(score)), "最后一局": last_dt.date()}
-            )
+    # --- 1. 计算统计数据 (总局数、胜率) ---
+    # 利用 history_df 按姓名分组统计
+    stats = history_df.groupby('Name').agg(
+        Total_Games=('Result', 'count'),                   # 总局数
+        Win_Count=('Result', lambda x: (x == 'Win').sum()) # 胜局数
+    )
+    # 计算胜率 (保留1位小数 + %)
+    stats['Win_Rate'] = (stats['Win_Count'] / stats['Total_Games'] * 100).round(1).astype(str) + '%'
 
-        if rank_rows:
-            rank_df = (
-                pd.DataFrame(rank_rows)
-                .sort_values("分数", ascending=False)
-                .reset_index(drop=True)
-            )
-            rank_df.index += 1
-            st.dataframe(rank_df, height=400, width="stretch")
+    # --- 2. 准备基础排名数据 ---
+    rank_data = []
+    for p, r in ratings.items():
+        rank_data.append({'Name': p, 'Rating': int(r)})
+    rank_df = pd.DataFrame(rank_data)
+
+    # --- 3. 合并数据并过滤 ---
+    if not rank_df.empty:
+        # 合并等级分和统计数据
+        full_df = pd.merge(rank_df, stats, on='Name', how='left')
+        full_df['Total_Games'] = full_df['Total_Games'].fillna(0).astype(int)
+        full_df['Win_Rate'] = full_df['Win_Rate'].fillna('0.0%')
+
+        # 【核心过滤】：只显示对局数 >= 20 的选手
+        threshold = 20
+        display_df = full_df[full_df['Total_Games'] >= threshold].copy()
+
+        if not display_df.empty:
+            # 排序：按分数降序
+            display_df = display_df.sort_values(by='Rating', ascending=False).reset_index(drop=True)
+            display_df.index += 1 # 排名从1开始
+
+            # 整理列名并显示
+            display_df = display_df[['Name', 'Rating', 'Total_Games', 'Win_Rate']]
+            display_df.columns = ['选手', '等级分', '总局数', '总胜率']
+            
+            st.table(display_df)
+            st.caption(f"注：仅显示对局数 ≥ {threshold} 局的活跃选手；新入局或对局较少者暂不列入排行。")
         else:
-            st.info("😴 暂无活跃选手")
+            st.info(f"暂无满足条件（对局数 ≥ {threshold}）的选手数据。")
     else:
-        st.info("暂无任何对局记录")
+        st.info("暂无排名数据")
 
 with col_trend:
     st.subheader("📈 历史走势")
