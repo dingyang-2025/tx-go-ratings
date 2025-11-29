@@ -404,92 +404,114 @@ st.divider()
 
 
 # ========== 选手详细档案 ==========
-st.subheader("🔍 选手详细档案")
-col_sel, col_stats = st.columns([1, 3])
+st.header("🔍 选手详细档案")
 
-if "current_selected_player" not in st.session_state:
-    st.session_state.current_selected_player = "(请选择)"
+player_list = sorted(ratings.keys())
+selected_player = st.selectbox("选择选手查看详情:", player_list)
 
-with col_sel:
-    target = st.selectbox(
-        "选择选手查看详情：",
-        ["(请选择)"] + sorted(list(ratings.keys())),
-        key="current_selected_player",
-    )
+if selected_player:
+    # --- 1. 获取基础数据 ---
+    curr_rating = int(ratings[selected_player])
+    player_history = history_df[history_df['Name'] == selected_player].copy()
+    
+    # --- 2. 计算当前名次 (基于上方已经算好的 display_df) ---
+    # 逻辑：在 display_df (≥15局榜单) 里找该选手的位置
+    current_rank_display = "未上榜 (局数<15)"
+    if 'display_df' in locals() and not display_df.empty:
+        # 查找选手是否在榜单中
+        rank_search = display_df[display_df['选手'] == selected_player]
+        if not rank_search.empty:
+            # 获取索引值 (因为索引已经是排名了)
+            rank_val = rank_search.index[0]
+            current_rank_display = f"第 {rank_val} 名"
 
-if target != "(请选择)":
-    # 基础数据
-    my_games = df[
-        (df["Player1"] == target) | (df["Player2"] == target)
-    ].sort_values("Date", ascending=False)
-    total_games = len(my_games)
-    wins = len(my_games[my_games["Winner"] == target])
-    win_rate = (wins / total_games * 100) if total_games > 0 else 0.0
-    curr_score = int(round(ratings.get(target, 1500)))
-
-    # 历史 Elo 极值
-    my_history = history_df[history_df["Name"] == target].sort_values("Date")
-    if not my_history.empty:
-        peak_row = my_history.loc[my_history["Rating"].idxmax()]
-        low_row = my_history.loc[my_history["Rating"].idxmin()]
-        peak_score = int(round(peak_row["Rating"]))
-        low_score = int(round(low_row["Rating"]))
-        peak_date = peak_row["Date"].strftime("%Y-%m-%d")
-        low_date = low_row["Date"].strftime("%Y-%m-%d")
+    # --- 3. 计算巅峰与最低 ---
+    # 从历史记录里提取该选手的等级分走势
+    # 注意：history_df 里存的是每一局结束后的 Rating
+    if not player_history.empty:
+        max_rating = int(player_history['Rating'].max())
+        min_rating = int(player_history['Rating'].min())
     else:
-        peak_score = low_score = curr_score
-        peak_date = low_date = "N/A"
+        max_rating = curr_rating
+        min_rating = curr_rating
 
-    # 对手分析
-    rival_data = get_rival_analysis(target, df)
-    old_rivals = sorted(rival_data, key=lambda x: x["total"], reverse=True)[:3]
-    nemesis = sorted(
-        [r for r in rival_data if r["total"] >= 2],
-        key=lambda x: x["win_rate"],
-    )[:3]
-    preys = sorted(
-        [r for r in rival_data if r["total"] >= 2],
-        key=lambda x: x["win_rate"],
-        reverse=True,
-    )[:3]
+    # --- 4. 展示顶部核心指标 (3列) ---
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("当前等级分", f"{curr_rating}", delta=current_rank_display) 
+        # delta 这里的颜色默认是绿色/红色，用来显示名次很显眼
+    with col2:
+        st.metric("历史最高", f"{max_rating}")
+    with col3:
+        st.metric("历史最低", f"{min_rating}")
 
-    with col_stats:
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("当前等级分", curr_score)
-        m2.metric("巅峰等级分", peak_score, delta=peak_date)
-        m3.metric("最低等级分", low_score, delta=low_date, delta_color="inverse")
-        m4.metric("总对局数", f"{total_games} 局")
-        m5.metric("总胜率", f"{win_rate:.1f}%")
+    # --- 5. 绘制个人走势图 ---
+    st.subheader("📈 个人积分走势")
+    if not player_history.empty:
+        player_history['Date'] = pd.to_datetime(player_history['Date'])
+        player_history = player_history.sort_values('Date')
+        
+        st.line_chart(player_history, x='Date', y='Rating')
+    else:
+        st.info("暂无对局记录")
 
-        st.divider()
+    # --- 6. 对手分析逻辑 (核心修改) ---
+    st.subheader("⚔️ 对手分析")
+    
+    if not player_history.empty:
+        # 预计算：按对手分组，算出 (局数, 胜局数)
+        opp_stats = player_history.groupby('Opponent').agg(
+            Games=('Result', 'count'),
+            Wins=('Result', lambda x: (x == 'Win').sum())
+        )
+        # 计算胜率 (小数 0.5, 1.0 等)
+        opp_stats['Win_Rate_Num'] = opp_stats['Wins'] / opp_stats['Games']
+        # 格式化胜率 (字符串 50.0%)
+        opp_stats['Win_Rate_Str'] = (opp_stats['Win_Rate_Num'] * 100).round(1).astype(str) + '%'
 
-        c_rival, c_nemesis, c_prey = st.columns(3)
+        # --- A. 老对手 (对局数最多) ---
+        # 逻辑：只看局数，降序
+        old_rivals = opp_stats.sort_values(by='Games', ascending=False).head(5)
+        
+        # --- B. 苦手 (胜率 < 50%) ---
+        # 逻辑：先筛选 < 0.5
+        nemesis = opp_stats[opp_stats['Win_Rate_Num'] < 0.5].copy()
+        # 排序：先按胜率【升序】(越低越怕)，再按局数【降序】(输得越多越怕)
+        nemesis = nemesis.sort_values(by=['Win_Rate_Num', 'Games'], ascending=[True, False]).head(5)
 
-        def format_list(data_list: list[dict]) -> str:
-            if not data_list:
-                return "无数据"
-            lines = []
-            for i, r in enumerate(data_list, start=1):
-                lines.append(
-                    f"**{i}. {r['name']}**（{r['total']}局，胜率 {r['win_rate']:.0f}%）"
-                )
-            return "\n\n".join(lines)
+        # --- C. 下手 (胜率 > 50%) ---
+        # 逻辑：先筛选 > 0.5
+        prey = opp_stats[opp_stats['Win_Rate_Num'] > 0.5].copy()
+        # 排序：先按胜率【降序】(越高越稳)，再按局数【降序】(赢得越多越稳)
+        prey = prey.sort_values(by=['Win_Rate_Num', 'Games'], ascending=[False, False]).head(5)
 
-        with c_rival:
-            st.markdown("#### 🤝 老对手（交手最多）")
-            st.markdown(format_list(old_rivals))
+        # --- 7. 展示三张表 ---
+        c1, c2, c3 = st.columns(3)
+        
+        with c1:
+            st.write("**🤝 老对手 (局数最多)**")
+            if not old_rivals.empty:
+                # 只展示 局数、胜率
+                st.dataframe(old_rivals[['Games', 'Win_Rate_Str']].rename(columns={'Games':'局', 'Win_Rate_Str':'率'}), use_container_width=True)
+            else:
+                st.caption("暂无数据")
 
-        with c_nemesis:
-            st.markdown("#### ☠️ 苦手（胜率最低）")
-            st.caption("*(仅统计对局数 ≥ 2)*")
-            st.markdown(format_list(nemesis))
+        with c2:
+            st.write("**😨 苦手 (胜率 < 50%)**")
+            if not nemesis.empty:
+                st.dataframe(nemesis[['Games', 'Win_Rate_Str']].rename(columns={'Games':'局', 'Win_Rate_Str':'率'}), use_container_width=True)
+            else:
+                st.caption("暂无苦手 (太强了!)")
 
-        with c_prey:
-            st.markdown("#### 🍲 下手（胜率最高）")
-            st.caption("*(仅统计对局数 ≥ 2)*")
-            st.markdown(format_list(preys))
+        with c3:
+            st.write("**🍰 下手 (胜率 > 50%)**")
+            if not prey.empty:
+                st.dataframe(prey[['Games', 'Win_Rate_Str']].rename(columns={'Games':'局', 'Win_Rate_Str':'率'}), use_container_width=True)
+            else:
+                st.caption("暂无下手")
 
-    st.divider()
+    else:
+        st.info("暂无对局数据，无法分析对手。")
 
     # 个人完整对局记录
     st.markdown(f"#### 📜 {target} 完整对局记录")
