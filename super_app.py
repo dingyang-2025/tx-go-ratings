@@ -406,31 +406,27 @@ st.divider()
 # ========== 选手详细档案 ==========
 st.header("🔍 选手详细档案")
 
-# --- 1. 默认不显示，需主动选择 ---
-# 列表前加一个占位符
+# --- 1. 选人交互 ---
 all_players = sorted(ratings.keys())
 selected_player = st.selectbox("选择选手查看详情:", ["(请选择)"] + all_players)
 
 if selected_player != "(请选择)":
-    # 获取该选手数据
+    # --- 2. 准备数据 ---
     curr_rating = int(ratings[selected_player])
+    # 筛选出【个人】的历史记录
     player_history = history_df[history_df['Name'] == selected_player].copy()
     
-    # --- 计算名次 (基于上方 >=15 局的 display_df) ---
-    # 默认为空
+    # 计算名次
     rank_text = "" 
-    # 检查上方是否生成了 display_df 且不为空
     if 'display_df' in locals() and not display_df.empty:
-        # 在榜单里找这个人
         rank_search = display_df[display_df['选手'] == selected_player]
         if not rank_search.empty:
-            # 获取排名 (index)
             r_val = rank_search.index[0]
             rank_text = f"第 {r_val} 名"
         else:
             rank_text = "未上榜"
 
-    # --- 计算最高/最低分 ---
+    # 计算极值
     if not player_history.empty:
         max_rating = int(player_history['Rating'].max())
         min_rating = int(player_history['Rating'].min())
@@ -438,132 +434,80 @@ if selected_player != "(请选择)":
         max_rating = curr_rating
         min_rating = curr_rating
 
-    # --- 2. 还原经典布局：3个指标卡片 ---
+    # --- 3. 指标卡片 (维持经典布局) ---
     col1, col2, col3 = st.columns(3)
     with col1:
-        # 如果有名次，显示为绿色/红色的小字 (delta)
         st.metric("当前等级分", f"{curr_rating}", delta=rank_text if rank_text else None)
     with col2:
         st.metric("历史最高", f"{max_rating}")
     with col3:
         st.metric("历史最低", f"{min_rating}")
 
-    # (已删除个人积分走势图)
-
-    # --- 3. 对手分析 (纯文字列表版) ---
-    st.subheader("⚔️ 对手分析 (Top 5)")
+    # --- 4. 这里的布局严格还原截图 ---
+    # 分隔线
+    st.markdown("---")
     
     if not player_history.empty:
-        # 预计算数据
+        # 预计算对手数据
         opp_stats = player_history.groupby('Opponent').agg(
             Games=('Result', 'count'),
             Wins=('Result', lambda x: (x == 'Win').sum())
         ).reset_index()
-        
-        # 计算胜率 (0.0 - 1.0)
         opp_stats['Win_Rate'] = opp_stats['Wins'] / opp_stats['Games']
 
-        # --- A. 老对手 (局数最多) ---
-        # 规则：至少 2 局，按局数降序
+        # --- A. 🤝 老对手 (局数最多) ---
+        # 规则：≥2局，按局数降序
         rivals = opp_stats[opp_stats['Games'] >= 2].sort_values(by='Games', ascending=False).head(5)
 
-        # --- B. 苦手 (胜率 < 50%) ---
-        # 规则：至少 2 局，胜率 < 0.5。排序：胜率升序(越低越惨) -> 局数降序(输越多越惨)
+        # --- B. ☠️ 苦手 (胜率 < 50%) ---
+        # 规则：≥2局，胜率<50%。排序：胜率升序(越惨越前) -> 局数降序
         nemesis = opp_stats[
             (opp_stats['Games'] >= 2) & 
             (opp_stats['Win_Rate'] < 0.5)
         ].sort_values(by=['Win_Rate', 'Games'], ascending=[True, False]).head(5)
 
-        # --- C. 下手 (胜率 > 50%) ---
-        # 规则：至少 2 局，胜率 > 0.5。排序：胜率降序(越高越稳) -> 局数降序(赢越多越稳)
+        # --- C. 🍰 下手 (胜率 > 50%) ---
+        # 规则：≥2局，胜率>50%。排序：胜率降序(越稳越前) -> 局数降序
         prey = opp_stats[
             (opp_stats['Games'] >= 2) & 
             (opp_stats['Win_Rate'] > 0.5)
         ].sort_values(by=['Win_Rate', 'Games'], ascending=[False, False]).head(5)
 
-        # --- 展示列表 (3列布局) ---
+        # --- 经典三列布局 (纯文本列表) ---
         c1, c2, c3 = st.columns(3)
         
         with c1:
-            st.markdown("**🤝 老对手**")
+            st.markdown("### 🤝 老对手") # 使用 Markdown 标题保持字号
             if not rivals.empty:
                 for _, row in rivals.iterrows():
-                    # 格式：姓名 (5胜3负)
                     wins = row['Wins']
                     losses = row['Games'] - wins
                     st.write(f"{row['Opponent']} ({wins}胜{losses}负)")
             else:
-                st.caption("暂无(需≥2局)")
+                st.caption("暂无")
 
         with c2:
-            st.markdown("**😨 苦手**")
+            st.markdown("### ☠️ 苦手") # 还原骷髅头图标
             if not nemesis.empty:
                 for _, row in nemesis.iterrows():
                     wins = row['Wins']
                     losses = row['Games'] - wins
-                    # 算出胜率百分比用于展示
-                    wr_str = f"{row['Win_Rate']*100:.0f}%"
                     st.write(f"{row['Opponent']} ({wins}胜{losses}负)")
             else:
-                st.caption("暂无(需≥2局且胜率<50%)")
+                st.caption("暂无")
 
         with c3:
-            st.markdown("**🍰 下手**")
+            st.markdown("### 🍰 下手") # 还原蛋糕图标
             if not prey.empty:
                 for _, row in prey.iterrows():
                     wins = row['Wins']
                     losses = row['Games'] - wins
                     st.write(f"{row['Opponent']} ({wins}胜{losses}负)")
             else:
-                st.caption("暂无(需≥2局且胜率>50%)")
+                st.caption("暂无")
 
-    else:
-        st.info("暂无对局记录")
-
-# --- 4. 恢复：全公司完整对局记录 ---
-st.markdown("---") # 分割线
-st.header("📜 全公司完整对局记录")
-
-# 按日期降序显示
-if not history_df.empty:
-    # 只展示原汁原味的对局表，去掉 User 视角的重复行，重新读取原始 Date
-    # 为了展示美观，我们直接用 df (原始读入的数据) 或 history_df 去重
-    # 这里为了方便，直接展示处理好的 history_df，但只取 Result='Win' 的行来模拟原始记录表，或者直接展示 df
-    # 最佳方案：展示处理过的 history_df，但只显示特定列
-    
-    # 简单处理：显示所有记录，按时间倒序
-    # 为了不显示两行一模一样的（A赢B，B输A），我们可以只筛选 Result='Win' 的行作为“对局记录”
-    display_history = history_df[history_df['Result'] == 'Win'].copy()
-    display_history = display_history.sort_values(by='Date', ascending=False)
-    
-    # 整理列名
-    display_history = display_history[['Date', 'Name', 'Opponent', 'Note1', 'Note2']]
-    display_history.columns = ['日期', '胜者', '败者', '赛事', '轮次']
-    
-    st.dataframe(display_history, use_container_width=True)
-else:
-    st.info("暂无数据")
-    
-# ========== 全公司完整对局记录 ==========
-st.subheader("📜 全公司完整对局记录")
-if not df.empty:
-    full_display = (
-        df.sort_values("Date", ascending=False)
-        .rename(
-            columns={
-                "Date": "日期",
-                "Player1": "选手1",
-                "Player2": "选手2",
-                "Winner": "获胜者",
-                "Note": "备注",
-            }
-        )
-        .copy()
-    )
-    full_display["日期"] = pd.to_datetime(full_display["日期"]).dt.strftime(
-        "%Y-%m-%d"
-    )
-    cols_to_show = ["日期", "选手1", "选手2", "获胜者", "备注"]
-    st.dataframe(full_display[cols_to_show], width="stretch", height=500)
-else:
-    st.info("目前还没有任何对局记录。")
+        # --- 5. 个人对局记录 (还原) ---
+        st.subheader("📜 个人对局记录")
+        # 按日期倒序
+        ph_display = player_history.sort_values(by='Date', ascending=False).copy()
+        #
