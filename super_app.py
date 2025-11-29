@@ -15,6 +15,27 @@ FILE_PATH = os.path.join(BASE_DIR, "data.csv")
 
 EXPECTED_COLUMNS = ["Date", "Player1", "Player2", "Winner", "Note1", "Note2"]
 
+# ===============================
+# 荣誉标记配置
+# ===============================
+
+# 历届个人赛冠军名单（你自己填！下面只是示例）
+CHAMPION_PLAYERS: set[str] = {
+    # "彭雄伟", "章恒", "沈张毅", "丁阳", "刘博东", ...
+}
+
+# “百胜”门槛
+WIN_MILESTONE = 100
+
+
+def build_badges(name: str, wins: int | None = None) -> list[str]:
+    """根据名字 + 胜局数，返回要展示的徽章文字列表。"""
+    badges: list[str] = []
+    if name in CHAMPION_PLAYERS:
+        badges.append("👑 腾冠")
+    if wins is not None and wins >= WIN_MILESTONE:
+        badges.append("💯 百胜")
+    return badges
 
 # ===============================
 # 工具函数
@@ -348,6 +369,16 @@ with col_rank:
             display_df = display_df[display_df['Last_Active'] >= two_years_ago]
 
         if not display_df.empty:
+            # 先加徽章再整理列名
+            def decorate_name(row):
+            wins = int(row.get("Win_Count", 0))
+            badges = build_badges(row["Name"], wins)
+            if not badges:
+                return row["Name"]
+            return f"{row['Name']}  {' · '.join(badges)}"
+
+            display_df["Name"] = display_df.apply(decorate_name, axis=1)  
+            
             # 排序：按分数降序
             display_df = display_df.sort_values(by='Rating', ascending=False).reset_index(drop=True)
             display_df.index += 1 
@@ -480,6 +511,9 @@ if target != "(请选择)":
                 rank_text = f"名次：未上榜（对局数 < {threshold_rank} 局）"
     else:
         rank_text = "名次：暂无数据"
+    
+    # 当前选手的荣誉徽章
+    player_badges = build_badges(target, wins)
 
     # 对手分析
     rival_data = get_rival_analysis(target, df)
@@ -518,6 +552,18 @@ if target != "(请选择)":
         # 5 个指标
         m1, m2, m3, m4, m5 = st.columns(5)
 
+    # 荣誉徽章
+    if player_badges:
+        st.markdown(f"**荣誉徽章：** {' · '.join(player_badges)}")
+    else:
+        # 不想显示这行可以删掉这句
+        st.caption("荣誉徽章：暂无特殊称号")
+
+    st.divider()
+
+    c_rival, c_nemesis, c_prey = st.columns(3)
+    # ...
+    
         # 在“当前等级分”下面加名次说明
         with m1:
             st.metric("当前等级分", curr_score)
