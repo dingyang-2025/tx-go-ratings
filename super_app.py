@@ -790,3 +790,89 @@ else:
             )
             cols_to_show = ["日期", "选手1", "选手2", "获胜者", "备注"]
             st.dataframe(display_h2h[cols_to_show], width="stretch", height=400)
+
+# ========== 数据维护（最近 N 条记录） ==========
+st.divider()
+st.subheader("🛠 数据维护（最近对局记录）")
+
+if df.empty:
+    st.info("当前还没有任何对局记录。")
+else:
+    # 想只维护最近多少条，可以改这个数字
+    N_RECENT = 50
+
+    # 取最近 N 条对局（按日期倒序），保留原始索引，方便回写
+    recent = df.sort_values("Date", ascending=False).head(N_RECENT).copy()
+    recent = recent.reset_index().rename(columns={"index": "__row_id"})
+
+    # 准备展示用的 DataFrame
+    recent_display = recent[
+        ["__row_id", "Date", "Player1", "Player2", "Winner", "Note1", "Note2"]
+    ].copy()
+
+    # 重命名成中文列名，便于看
+    recent_display = recent_display.rename(
+        columns={
+            "Date": "日期",
+            "Player1": "选手1",
+            "Player2": "选手2",
+            "Winner": "获胜者",
+            "Note1": "备注1",
+            "Note2": "备注2",
+        }
+    )
+
+    # 增加一列“删除？”
+    recent_display["删除?"] = False
+
+    st.caption(f"仅展示最近 {len(recent_display)} 条对局，可在此修改字段或勾选删除。")
+    edited = st.data_editor(
+        recent_display,
+        num_rows="fixed",
+        hide_index=True,
+        key="data_maintain_editor",
+    )
+
+    if st.button("💾 保存上述修改到 data.csv"):
+        # 把中文列名映射回内部列名
+        internal = edited.rename(
+            columns={
+                "日期": "Date",
+                "选手1": "Player1",
+                "选手2": "Player2",
+                "获胜者": "Winner",
+                "备注1": "Note1",
+                "备注2": "Note2",
+                "删除?": "__delete",
+            }
+        ).copy()
+
+        # 遍历每一行，根据 __row_id 定位到原 df
+        to_drop_indices = []
+        for _, row in internal.iterrows():
+            row_id = int(row["__row_id"])
+            if row["__delete"]:
+                to_drop_indices.append(row_id)
+            else:
+                # 更新原始 df 中对应行的内容
+                df.loc[row_id, "Date"] = row["Date"]
+                df.loc[row_id, "Player1"] = row["Player1"]
+                df.loc[row_id, "Player2"] = row["Player2"]
+                df.loc[row_id, "Winner"] = row["Winner"]
+                df.loc[row_id, "Note1"] = row.get("Note1", "")
+                df.loc[row_id, "Note2"] = row.get("Note2", "")
+
+        # 统一删除需要删除的行
+        if to_drop_indices:
+            df = df.drop(index=to_drop_indices)
+
+        # 重新生成合并后的 Note 列（保持和前面逻辑一致）
+        df["Note1"] = df["Note1"].fillna("").astype(str)
+        df["Note2"] = df["Note2"].fillna("").astype(str)
+        df["Note"] = df["Note1"] + " | " + df["Note2"]
+
+        # 覆盖写回 data.csv
+        df.to_csv(FILE_PATH, index=False)
+
+        st.success("已将修改写入 data.csv，页面将刷新以应用最新数据。")
+        st.rerun()
