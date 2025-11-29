@@ -717,7 +717,6 @@ st.subheader("🤝 查询交手记录")
 
 if df.empty:
     st.info("目前还没有任何对局记录，无法查询交手情况。")
-
 else:
     # 提取所有出现过的选手姓名，先用 standardize_name 清理，再按拼音排序
     p1_names = df["Player1"].dropna().map(standardize_name)
@@ -740,6 +739,34 @@ else:
         player_a = st.selectbox("选手 A", player_options, key="h2h_player_a")
     with col_b:
         player_b = st.selectbox("选手 B", player_options, key="h2h_player_b")
+
+    if player_a == "(请选择)" or player_b == "(请选择)":
+        st.info("请选择两个选手以查询交手记录。")
+    elif player_a == player_b:
+        st.warning("请不要选择同一个选手。")
+    else:
+        # 过滤两人之间的全部对局（双向匹配）
+        mask = (
+            ((df["Player1"] == player_a) & (df["Player2"] == player_b))
+            | ((df["Player1"] == player_b) & (df["Player2"] == player_a))
+        )
+        h2h_games = df[mask].sort_values("Date", ascending=False)
+
+        total_h2h = len(h2h_games)
+        if total_h2h == 0:
+            st.info(f"目前没有 {player_a} 与 {player_b} 的对局记录。")
+        else:
+            wins_a = (h2h_games["Winner"] == player_a).sum()
+            wins_b = (h2h_games["Winner"] == player_b).sum()
+            others = total_h2h - wins_a - wins_b
+
+            col_total, col_a_stat, col_b_stat = st.columns(3)
+            with col_total:
+                st.metric("交手总局数", f"{total_h2h} 局")
+            with col_a_stat:
+                st.metric(f"{player_a} 胜局数", f"{wins_a} 局")
+            with col_b_stat:
+                st.metric(f"{player_b} 胜局数", f"{wins_b} 局")
 
             if others > 0:
                 st.caption(f"其中有 {others} 局未能判定胜负（或记录异常）。")
