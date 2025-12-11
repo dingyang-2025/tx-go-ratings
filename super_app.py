@@ -393,128 +393,113 @@ col_rank, col_trend = st.columns([1, 2])
 with col_rank:
     st.subheader("🏆 实时排行 (Top Ratings)")
 
-    # --- 1. 活跃筛选 ---
+    # --- 1. 活跃筛选按钮 ---
+    # 默认勾选，定义“活跃”为近 730 天（2年）
     active_only = st.checkbox("只看活跃 (近2年)", value=True)
 
-    # history_df / ratings 都为空就没得算了
     if history_df.empty or not ratings:
         st.info("暂无排名数据")
     else:
-        # --- 2. 总局数 / 胜率 ---
-        stats = history_df.groupby("Name").agg(
-            Total_Games=("Result", "count"),
-            Win_Count=("Result", lambda x: (x == "Win").sum()),
+        # --- 2. 计算统计数据 (总局数、胜率) ---
+        stats = history_df.groupby('Name').agg(
+            Total_Games=('Result', 'count'),
+            Win_Count=('Result', lambda x: (x == 'Win').sum())
         )
-        stats["Win_Rate"] = (
-            stats["Win_Count"] / stats["Total_Games"] * 100
-        ).round(1).astype(str) + "%"
+        stats['Win_Rate'] = (stats['Win_Count'] / stats['Total_Games'] * 100).round(1).astype(str) + '%'
 
         # --- 2.1 计算“上一局后的等级分变化 Delta” ---
-        # 先按 Name + Date 排好，再对每个 Name 做 shift(1)
-        h_sorted = history_df.sort_values(["Name", "Date"]).copy()
-        h_sorted["Prev_Rating"] = h_sorted.groupby("Name")["Rating"].shift(1)
+        h_sorted = history_df.sort_values(['Name', 'Date']).copy()
+        h_sorted['Prev_Rating'] = h_sorted.groupby('Name')['Rating'].shift(1)
+        last_rows = h_sorted.groupby('Name').tail(1)[['Name', 'Rating', 'Prev_Rating']]
+        last_rows['Delta'] = last_rows['Rating'] - last_rows['Prev_Rating']
+        delta_df = last_rows[['Name', 'Delta']]
 
-        # 每个选手取最近一局
-        last_rows = h_sorted.groupby("Name").tail(1)[["Name", "Rating", "Prev_Rating"]]
-        last_rows["Delta"] = last_rows["Rating"] - last_rows["Prev_Rating"]
-        delta_df = last_rows[["Name", "Delta"]]
-
-        # --- 3. 当前 Elo + 最近活跃时间 ---
+        # --- 3. 组装当前等级分 & 最近活跃时间 ---
         rank_data = []
         for p, r in ratings.items():
-            rank_data.append(
-                {
-                    "Name": p,
-                    "Rating": int(r),
-                    "Last_Active": last_active.get(p),
-                }
-            )
+            rank_data.append({
+                'Name': p,
+                'Rating': int(r),
+                'Last_Active': last_active.get(p)
+            })
         rank_df = pd.DataFrame(rank_data)
 
-        # --- 4. 合并所有信息 ---
+        # --- 4. 合并与多重筛选 ---
         if not rank_df.empty:
-            full_df = (
-                rank_df.merge(stats, on="Name", how="left")
-                       .merge(delta_df, on="Name", how="left")
-            )
-            full_df["Total_Games"] = full_df["Total_Games"].fillna(0).astype(int)
-            full_df["Win_Rate"] = full_df["Win_Rate"].fillna("0.0%")
-            full_df["Win_Count"] = full_df["Win_Count"].fillna(0).astype(int)
-            full_df["Delta"] = full_df["Delta"].fillna(0)
+            full_df = (rank_df
+                       .merge(stats, on='Name', how='left')
+                       .merge(delta_df, on='Name', how='left'))
+            full_df['Total_Games'] = full_df['Total_Games'].fillna(0).astype(int)
+            full_df['Win_Rate'] = full_df['Win_Rate'].fillna('0.0%')
+            full_df['Win_Count'] = full_df['Win_Count'].fillna(0).astype(int)
+            full_df['Delta'] = full_df['Delta'].fillna(0)
 
-            # 门槛：15 局
+            # 只统计总局数 ≥ threshold 的选手
             threshold = 15
-            display_df = full_df[full_df["Total_Games"] >= threshold].copy()
+            display_df = full_df[full_df['Total_Games'] >= threshold].copy()
 
-            # 活跃筛选
+            # 活跃筛选：近 2 年
             if active_only:
                 two_years_ago = pd.Timestamp.now() - pd.DateOffset(days=730)
-                display_df["Last_Active"] = pd.to_datetime(display_df["Last_Active"])
-                display_df = display_df[display_df["Last_Active"] >= two_years_ago]
+                display_df['Last_Active'] = pd.to_datetime(display_df['Last_Active'])
+                display_df = display_df[display_df['Last_Active'] >= two_years_ago]
 
             if not display_df.empty:
-                # 给“选手”列加徽章
-                def decorate_name(row):
-                    wins = int(row.get("Win_Count", 0) or 0)
-                    badges = build_badges(row["Name"], wins)
-                    if not badges:
-                        return row["Name"]
-                    return f"{row['Name']}  {' · '.join(badges)}"
+                # 使用我们自己的拼音排序 key 排
+                display_df['Name_sorted'] = display_df['Name'].apply(player_sort_key)
 
-                display_df["Name"] = display_df.apply(decorate_name, axis=1)
-
-                # 排序：按 Elo 降序
+                # 排序：先按等级分降序，再按拼音
                 display_df = display_df.sort_values(
-                    by="Rating", ascending=False
+                    by=['Rating', 'Name_sorted'],
+                    ascending=[False, True]
                 ).reset_index(drop=True)
                 display_df.index += 1
 
-                # 只保留要展示的列：多了一列 Delta
-                display_df = display_df[
-                    ["Name", "Rating", "Delta", "Total_Games", "Win_Rate"]
-                ]
-                display_df.columns = ["选手", "等级分", "变化", "总局数", "总胜率"]
+                # 处理勋章
+                def decorate_name(row):
+                    wins = int(row.get('Win_Count', 0) or 0)
+                    badges = build_badges(row['Name'], wins)
+                    if not badges:
+                        return row['Name']
+                    return f"{row['Name']}  {' · '.join(badges)}"
 
-                # --- 5. 把 Delta 格式化成“↑ 12 / ↓ 8 / —” 并上色 ---
+                display_df['Name'] = display_df.apply(decorate_name, axis=1)
+
+                # 生成“变化”列（↑ 12 / ↓ 8 / —）
                 def format_delta_cell(v):
                     try:
                         v = float(v)
                     except Exception:
-                        return "—"
+                        return '—'
                     if v == 0:
-                        return "—"
-                    arrow = "↑" if v > 0 else "↓"
+                        return '—'
+                    arrow = '↑' if v > 0 else '↓'
                     return f"{arrow} {abs(int(v))}"
 
-                display_df["变化"] = display_df["变化"].apply(format_delta_cell)
+                display_df['Delta'] = display_df['Delta'].apply(format_delta_cell)
 
+                # 整理列名
+                display_df = display_df[['Name', 'Rating', 'Delta', 'Total_Games', 'Win_Rate']]
+                display_df.columns = ['选手', '等级分', '变化', '总局数', '总胜率']
+
+                # 着色：涨分绿、跌分红
                 def highlight_delta(val):
                     if isinstance(val, str):
-                        if val.startswith("↑"):
-                            return "color: #16a34a;"  # 绿色
-                        if val.startswith("↓"):
-                            return "color: #dc2626;"  # 红色
-                    return ""
+                        if val.startswith('↑'):
+                            return 'color: #16a34a;'  # 绿色
+                        if val.startswith('↓'):
+                            return 'color: #dc2626;'  # 红色
+                    return ''
 
-                styled = display_df.style.applymap(
-                    highlight_delta, subset=["变化"]
-                )
+                styled = display_df.style.applymap(highlight_delta, subset=['变化'])
 
                 st.dataframe(styled, width="stretch")
                 st.caption(f"注：榜单仅显示总对局数 ≥ {threshold} 局的选手。")
             else:
-                st.info(
-                    f"暂无满足条件的选手（需对局 ≥ {threshold} 且在活跃期内）。"
-                )
+                st.info(f"暂无满足条件的选手（需对局 ≥ {threshold} 且在活跃期内）。")
         else:
             st.info("暂无排名数据")
 
-            # 底部动态文案
-            st.caption(f"注：榜单仅显示总对局数 ≥ {threshold} 局的选手。")
-        else:
-            st.info(f"暂无满足条件的选手（需对局 ≥ {threshold} 且在活跃期内）。")
-    else:
-        st.info("暂无排名数据")
 
 with col_trend:
     st.subheader("📈 历史走势")
