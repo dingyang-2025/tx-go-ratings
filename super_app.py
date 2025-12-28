@@ -491,7 +491,7 @@ with col_rank:
                             return 'color: #dc2626;'  # 红色
                     return ''
 
-                styled = display_df.style.applymap(highlight_delta, subset=['变化'])
+                styled = display_df.style.map(highlight_delta, subset=['变化'])
 
                 st.dataframe(styled, width="stretch")
                 st.caption(f"注：榜单仅显示总对局数 ≥ {threshold} 局的选手。")
