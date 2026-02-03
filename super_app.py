@@ -329,45 +329,41 @@ def num_to_sgf(n):
 
 # --- 修正后的直播抓取逻辑 ---
 def fetch_txwq_live_sgf(chessid: str):
-    """
-    针对直播对局的抓取与转换 (增加请求头以绕过 400 错误)
-    """
-    # 强制使用 HTTPS 并添加伪装请求头
+    # 强制使用 https 并模拟真实浏览器环境
     url = f"https://h5.txwq.qq.com/cgi-bin/CommonMobileCGI/urldataget?chessid={chessid}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Mobile/15E148 Safari/604.1",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://h5.txwq.qq.com/txwqshare/index.html",
-        "Origin": "https://h5.txwq.qq.com"
+        "Accept": "application/json, text/javascript, */*; q=0.01"
     }
     
     try:
-        # 使用 GET 请求并带上伪装头
         resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
+        
+        # 解决 image_b77c99.png 的报错：先判断内容是否为空
+        if not resp.text.strip():
+            return None, "服务器返回了空内容，可能是该 ID 暂无实时数据。"
+            
         data = resp.json()
-        
         raw_moves = data.get("chess") or data.get("game_data")
-        if not raw_moves:
-            return None, "拿到数据但未发现棋谱坐标。可能是对局刚开始，暂无步数。"
-
-        sgf_header = f"(;GM[1]SZ[19]DT[{datetime.date.today()}]AP[TencentGo_Live]PC[野狐围棋]"
-        sgf_moves = ""
         
+        if not raw_moves:
+            return None, "接口响应正常，但未发现棋谱坐标数组。"
+
+        # 组装 SGF：腾讯直播坐标 [color, step, x, y]
+        sgf_header = f"(;GM[1]SZ[19]AP[TencentGo_Live]DT[{datetime.date.today()}]"
+        sgf_moves = ""
         for move in raw_moves:
             try:
-                # 腾讯 H5 逻辑：0为黑，1为白
                 color = "B" if move[0] == 0 else "W"
-                # 提取坐标数组中的 X, Y (通常是最后两个数值)
                 x, y = int(move[-2]), int(move[-1])
                 if 0 <= x <= 18 and 0 <= y <= 18:
                     sgf_moves += f";{color}[{num_to_sgf(x)}{num_to_sgf(y)}]"
-            except:
-                continue
-                
-        return sgf_header + sgf_moves + ")", None
+            except: continue
+        return sgf_header + sgf_moves + ")", "live_success"
     except Exception as e:
-        # 捕获 400 及其它请求错误
-        return None, f"直播抓取失败: {str(e)}"
+        return None, f"抓取异常: {str(e)}"
 
 # --- 稍微优化一下主抓取器，增加超时容错 ---
 def fetch_txwq_content_pro(input_str: str):
