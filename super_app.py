@@ -319,7 +319,7 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (终极云端直播兼容版) ---
+# --- 腾讯围棋抓取工具 (终极手机 APP 伪装版) ---
 import requests
 import datetime
 from urllib.parse import urlparse, parse_qs
@@ -329,21 +329,22 @@ def num_to_sgf(n):
 
 def fetch_txwq_ultimate(input_str: str):
     """
-    终极抓取器：通过 getTokens.php 真实模拟 H5 初始化全流程
+    换道超车：放弃 H5 网页模拟，直接伪装成野狐手机 APP 调用底层 CGI 接口
     """
     input_str = input_str.strip()
     chessid = input_str
     
+    # 提取所有隐藏的 APP 参数
     is_live_link = False
-    full_share_url = input_str
+    app_params = {}
     if "txwqshare" in input_str or "h5.txwq.qq.com" in input_str:
         is_live_link = True
         parsed = urlparse(input_str)
-        params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-        chessid = params.get("chessid", input_str)
+        app_params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        chessid = app_params.get("chessid", input_str)
 
     # ====================================================
-    # 策略 A：历史棋谱 (POST接口，用于已完结对局)
+    # 策略 A：历史棋谱 (APP 完结接口)
     # ====================================================
     try:
         resp = requests.post("http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess", data={"chessid": chessid}, timeout=5)
@@ -353,42 +354,48 @@ def fetch_txwq_ultimate(input_str: str):
     except: pass
 
     # ====================================================
-    # 策略 B：直播棋谱 (完美复现 H5 页面加载过程)
+    # 策略 B：直播棋谱 (伪装野狐手机 APP，直击底层接口)
     # ====================================================
     if not is_live_link:
         return None, "⚠️ 抓取直播需要输入包含 svrid, roomid 等参数的完整分享链接。"
 
-    session = requests.Session()
-    
-    # 1. 基础浏览器头
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Connection": "keep-alive",
-        "Referer": full_share_url
+    # 这里是核心：把 H5 链接里的参数，打包成手机 APP 的数据包格式
+    payload = {
+        "svrid": app_params.get("svrid", ""),
+        "svrtype": app_params.get("svrtype", ""),
+        "roomid": app_params.get("roomid", ""),
+        "createtime": app_params.get("createtime", ""),
+        "chessid": chessid,
+        "boardsize": "19"
     }
 
     try:
-        # 👑 核心突破步骤 1：访问令牌接口，强迫服务器生成 PHPSESSID
-        token_url = "https://h5.txwq.qq.com/qqgameweiqi/wechat/getTokens.php"
-        session.get(token_url, headers=headers, timeout=5)
+        # 👑 突破点：不再请求 h5.txwq... 而是直接请求 happyapp... (APP 专用接口)
+        app_api_url = "http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQGetChess"
+        
+        # 伪装成手机 APP 的请求头 (极其简单，不查 Cookie)
+        headers = {
+            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 10;)",
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
 
-        # 👑 核心突破步骤 2：带着刚拿到的 Cookie 去请求真实数据
-        api_url = f"https://h5.txwq.qq.com/qqgameweiqi/wechat/urldataget?chessid={chessid}"
-        live_resp = session.get(api_url, headers=headers, timeout=10)
-
-        # 验证是否再次被拦截
-        if not live_resp.text.strip():
-            return None, "❌ 抓取失败：接口响应为空。腾讯似乎在凌晨进行了接口维护或变更。"
+        live_resp = requests.post(app_api_url, data=payload, headers=headers, timeout=10)
+        
+        if live_resp.status_code == 400:
+            return None, "❌ 腾讯接口返回 400 错误：参数不匹配。请确认粘贴的是完整的分享链接。"
 
         live_data = live_resp.json()
+        
+        # 手机 APP 接口如果有错，会返回 result != 0
+        if live_data.get("result", -1) != 0:
+            return None, f"❌ 腾讯底层接口拒绝了请求：{live_data.get('resultstr', '未知错误')}"
+
         raw_moves = live_data.get("chess") or live_data.get("game_data")
-
         if not raw_moves:
-            return None, "❌ 连接成功但无棋谱坐标，对局可能刚刚建立，还未落子。"
+            return None, "❌ 连接成功但无棋谱坐标，对局可能未开始。"
 
-        # 3. 组装 SGF
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Cloud_Live]DT[{datetime.date.today()}]"
+        # 组装 SGF
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_App_Live]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         for move in raw_moves:
