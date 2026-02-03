@@ -319,7 +319,7 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (特洛伊木马：JS 注入版) ---
+# --- 腾讯围棋抓取工具 (终极幽灵木马：异步 Fetch 版) ---
 import datetime
 import json
 import time
@@ -347,7 +347,6 @@ def fetch_txwq_with_browser(input_str: str):
     if not is_live_link:
         return None, "⚠️ 抓取直播需要完整的分享链接。"
 
-    # 保持防白屏的配置
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
@@ -360,38 +359,46 @@ def fetch_txwq_with_browser(input_str: str):
     try:
         driver = webdriver.Chrome(options=chrome_options)
         
-        # 👑 步骤 1：正常打开分享页，让腾讯的 JS 跑起来，渲染棋盘
+        # 👑 设置 JS 异步超时时间（非常重要，给 Fetch 留足时间）
+        driver.set_script_timeout(10)
+        
         st.toast("正在云端加载直播画面...")
         driver.get(full_share_url)
-        time.sleep(4) # 必须等待，让页面生成合法的 _qimei_ 指纹
+        time.sleep(4) # 等待页面渲染和 Cookie 生成
 
-        st.toast("潜入成功！正在页面内部提取棋谱...")
+        st.toast("幽灵木马已释放！正在异步提取棋谱...")
         
-        # 👑 步骤 2：特洛伊木马！在当前合法页面内注入 JS 请求数据
-        # 这样做会自动带上该页面所有合法的 Cookie 和 Header，WAF 完全无法察觉
         api_url = f"https://h5.txwq.qq.com/qqgameweiqi/wechat/urldataget?chessid={chessid}"
         
+        # 👑 终极技术：使用异步 Fetch API，完美绕过浏览器的同步锁
         js_code = f"""
-        var xhr = new XMLHttpRequest();
-        xhr.open('GET', '{api_url}', false);  // 发送同步请求
-        xhr.send(null);
-        return xhr.responseText;
+        var done = arguments[arguments.length - 1];  // Selenium 异步回调接口
+        fetch('{api_url}', {{
+            method: 'GET',
+            headers: {{ 'Accept': 'application/json' }}
+        }})
+        .then(response => response.text())
+        .then(data => done(data))
+        .catch(err => done(''));
         """
         
-        # 执行 JS 并拿回结果
-        json_text = driver.execute_script(js_code)
+        # 使用 execute_async_script 执行异步代码
+        json_text = driver.execute_async_script(js_code)
 
         if not json_text or not json_text.strip():
-            return None, "❌ JS 注入执行成功，但未返回数据。棋局可能已过期。"
+            # 最后一道防线：把浏览器拍个照，看看是不是真被封号了
+            st.error("❌ 幽灵木马未带回数据。可能是腾讯刚更新了该局的权限。")
+            st.image(driver.get_screenshot_as_png(), caption="云端浏览器当前状态")
+            return None, "数据为空。请检查对局是否已结束或权限受限。"
 
         live_data = json.loads(json_text)
         raw_moves = live_data.get("chess") or live_data.get("game_data")
 
         if not raw_moves:
-            return None, "❌ 成功突破防御，但接口未返回棋谱步骤（游戏可能刚创建）。"
+            return None, "❌ 成功突破，但接口未返回坐标（棋局可能刚创建）。"
 
         # 组装 SGF
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Trojan_Live]DT[{datetime.date.today()}]"
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Ghost_Live]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         for move in raw_moves:
@@ -406,7 +413,7 @@ def fetch_txwq_with_browser(input_str: str):
         return sgf_header + sgf_moves + ")", f"✅ 直播抓取成功！当前进行至第 {move_count} 手。"
 
     except Exception as e:
-        return None, f"❌ 注入异常: {str(e)}"
+        return None, f"❌ 幽灵木马异常: {str(e)}"
     finally:
         if driver:
             driver.quit()
