@@ -318,6 +318,23 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
+# --- 腾讯围棋抓取工具 ---
+def fetch_txwq_content(chessid: str):
+    """从腾讯接口获取 SGF 内容"""
+    url = "http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess"
+    data = {"chessid": chessid}
+    try:
+        resp = requests.post(url, data=data, timeout=10)
+        resp.raise_for_status()
+        js = resp.json()
+        if js.get("result") == 0:
+            return js.get("chess")
+        else:
+            st.error(f"API 报错: {js.get('resultstr')}")
+            return None
+    except Exception as e:
+        st.error(f"连接失败: {e}")
+        return None
 
 # ===============================
 # 页面主逻辑
@@ -385,7 +402,29 @@ with st.sidebar:
                 save_game(new_date, p1, p2, final_winner, note1, note2)
                 st.success(f"已保存：{p1} vs {p2}（胜者：{final_winner}）")
                 st.rerun()
-
+    
+    st.divider()  # 加一条分割线
+    
+    # 新增：腾讯围棋抓取小工具
+    st.header("🛠 实用工具")
+    with st.expander("📥 腾讯围棋棋谱抓取"):
+        st.caption("输入对局 ID 即可提取 SGF 文件")
+        cid = st.text_input("Chess ID", placeholder="如: 1770092663030101341")
+        if st.button("获取并准备下载"):
+            if cid:
+                with st.spinner("抓取中..."):
+                    sgf_text = fetch_txwq_content(cid.strip())
+                    if sgf_text:
+                        st.success("抓取成功！")
+                        # 提供下载按钮
+                        st.download_button(
+                            label="💾 点击下载 SGF",
+                            data=sgf_text,
+                            file_name=f"TXWQ_{cid}.sgf",
+                            mime="text/plain"
+                        )
+            else:
+                st.warning("请输入有效 ID")
 
 # ========== 实时排行 & 多人 Elo 走势 ==========
 col_rank, col_trend = st.columns([1, 2])
