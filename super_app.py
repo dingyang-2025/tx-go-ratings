@@ -319,14 +319,13 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (核武版 + 拍照取证) ---
+# --- 腾讯围棋抓取工具 (防白屏终极版) ---
 import datetime
 import json
 import time
 from urllib.parse import urlparse, parse_qs
 import streamlit as st
 
-# 导入 Selenium 相关库
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -349,49 +348,50 @@ def fetch_txwq_with_browser(input_str: str):
     if not is_live_link:
         return None, "⚠️ 抓取直播需要完整的分享链接。"
 
-    # 配置隐形 Chrome
+    # 👑 核心：Linux 云端无头浏览器的"防白屏"全套参数
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")  # 使用新版无头模式，更不容易被检测
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--window-size=1920,1080") # 设置窗口大小，防止元素挤压
+    chrome_options.add_argument("--disable-gpu")  # 👈 必须禁用 GPU，否则云端必白屏
+    chrome_options.add_argument("--ignore-certificate-errors") # 👈 忽略 SSL 证书拦截
+    chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     driver = None
     try:
         driver = webdriver.Chrome(options=chrome_options)
         
-        # 👑 动作1：访问分享页，静静等待 JS 生成指纹 (加长等待时间至 4 秒)
-        st.toast("正在云端浏览器中打开分享页...")
+        st.toast("正在加载分享页生成指纹...")
         driver.get(full_share_url)
-        time.sleep(4) 
+        time.sleep(5) # 增加到 5 秒
 
-        # 👑 动作2：直接访问数据 API
-        st.toast("正在请求直播数据接口...")
+        st.toast("正在请求直播数据...")
         api_url = f"https://h5.txwq.qq.com/qqgameweiqi/wechat/urldataget?chessid={chessid}"
         driver.get(api_url)
+        time.sleep(3) # 确保数据加载完毕
         
-        # 👑 关键：再等 2 秒，确保 JSON 数据完全渲染到页面上
-        time.sleep(2)
-        
-        # 提取页面内容。Chrome 显示 JSON 时通常会包在一个 <pre> 标签里
+        # 提取页面文本
         try:
             json_text = driver.find_element(By.TAG_NAME, "pre").text
         except:
             json_text = driver.find_element(By.TAG_NAME, "body").text
 
+        # 🚨 调试模式：如果没抓到文本，直接把 HTML 源码也扒出来看！
         if not json_text.strip():
-            # 🔴 抓取失败：立刻拍照取证并展示在网页上！
+            raw_html = driver.page_source
             screenshot = driver.get_screenshot_as_png()
-            st.error("❌ 未截取到文本！这是云端浏览器当前的画面：")
-            st.image(screenshot, caption="云端浏览器实时截图")
-            return None, "请查看上方截图，看看腾讯是不是弹出了验证码或错误页。"
+            st.error("❌ 依然未截取到明文数据。")
+            st.image(screenshot, caption="浏览器截图")
+            with st.expander("🕵️‍♂️ 查看网页底层 HTML 源码 (一定有线索)"):
+                st.code(raw_html, language="html")
+            return None, "白屏了。请查看上方的 HTML 源码，看看服务器到底发回了什么。"
 
         live_data = json.loads(json_text)
         raw_moves = live_data.get("chess") or live_data.get("game_data")
 
         if not raw_moves:
-            return None, "❌ 连接成功但无棋谱坐标，对局可能未开始。"
+            return None, "❌ 无棋谱坐标，对局可能未开始。"
 
         # 组装 SGF
         sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Selenium_Live]DT[{datetime.date.today()}]"
