@@ -323,7 +323,7 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
 import datetime
 import json
 import time
-import requests # 👈 新增：让 Python 接管数据下载
+import requests
 from urllib.parse import urlparse, parse_qs
 import streamlit as st
 
@@ -362,12 +362,10 @@ def fetch_txwq_with_browser(input_str: str):
     try:
         driver = webdriver.Chrome(options=chrome_options)
         
-        # 👑 步骤 1：让浏览器干脏活——加载页面，生成复杂的指纹 Cookie
         st.toast("正在云端生成合法指纹 Cookie...")
         driver.get(full_share_url)
-        time.sleep(4) # 等待棋盘渲染
+        time.sleep(4)
 
-        # 👑 步骤 2：窃取 Cookie！
         st.toast("指纹提取成功，正在移交 Python 接管...")
         for cookie in driver.get_cookies():
             extracted_cookies[cookie['name']] = cookie['value']
@@ -375,10 +373,10 @@ def fetch_txwq_with_browser(input_str: str):
     except Exception as e:
         return None, f"❌ 浏览器启动异常: {str(e)}"
     finally:
-        if driver:
-            driver.quit() # 浏览器使命完成，立刻关闭以节省云端内存
+        if driver is not None:
+            driver.quit()
 
-    # 👑 步骤 3：Python 戴上面具，大摇大摆地去拿数据
+    # Python 接管下载
     api_url = f"https://h5.txwq.qq.com/qqgameweiqi/wechat/urldataget?chessid={chessid}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -387,7 +385,6 @@ def fetch_txwq_with_browser(input_str: str):
     }
 
     try:
-        # 使用偷来的 Cookie 进行请求
         resp = requests.get(api_url, headers=headers, cookies=extracted_cookies, timeout=10)
         
         if not resp.text.strip():
@@ -399,7 +396,6 @@ def fetch_txwq_with_browser(input_str: str):
         if not raw_moves:
             return None, "❌ 获取数据成功，但未找到坐标（可能对局刚创建）。"
 
-        # 组装 SGF
         sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Python_Live]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
@@ -416,7 +412,6 @@ def fetch_txwq_with_browser(input_str: str):
 
     except Exception as e:
         return None, f"❌ Python 下载异常: {str(e)}"
-            driver.quit()
 # ===============================
 # 页面主逻辑
 # ===============================
