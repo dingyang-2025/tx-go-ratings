@@ -319,7 +319,7 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (终极全频段雷达：拦截+精筛版) ---
+# --- 腾讯围棋抓取工具 (终极吸尘器：盲搜透视版) ---
 import datetime
 import json
 import time
@@ -331,6 +331,26 @@ from selenium.webdriver.chrome.options import Options
 
 def num_to_sgf(n):
     return chr(ord('a') + n)
+
+def find_moves_in_data(obj):
+    """
+    X光透视函数：不看字段名，递归扫描 JSON，寻找符合“围棋坐标”特征的数组
+    特征：[[0, 1, 15, 16], [1, 2, 4, 3], ...]
+    """
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, list) and len(v) > 0:
+                first = v[0]
+                # 命中特征：列表的第一个元素也是列表，且包含 >=4 个数字
+                if isinstance(first, list) and len(first) >= 4 and all(isinstance(i, (int, float)) for i in first):
+                    return v # 找到真货！
+            res = find_moves_in_data(v)
+            if res: return res
+    elif isinstance(obj, list):
+        for item in obj:
+            res = find_moves_in_data(item)
+            if res: return res
+    return None
 
 def fetch_txwq_with_browser(input_str: str):
     input_str = input_str.strip()
@@ -359,33 +379,25 @@ def fetch_txwq_with_browser(input_str: str):
     try:
         driver = webdriver.Chrome(options=chrome_options)
         
-        # 👑 升级版木马：拦截 XHR + Fetch + WebSocket，并把所有可疑数据装进一个数组！
+        # 👑 吸尘器模式：取消所有关键字过滤，只要是 JSON 文本，统统吸回来！
         intercept_js = """
-        window.__txwq_packets = []; // 这里是我们的数据仓库
-        
+        window.__txwq_packets = [];
         function savePacket(data) {
-            if (typeof data === 'string' && (data.includes('chess') || data.includes('game_data'))) {
+            if (typeof data === 'string' && data.includes('{') && data.length > 50) {
                 window.__txwq_packets.push(data);
             }
         }
-
-        // 1. 监听传统 XHR
         var origOpen = XMLHttpRequest.prototype.open;
         XMLHttpRequest.prototype.open = function() {
             this.addEventListener('load', function() { savePacket(this.responseText); });
             origOpen.apply(this, arguments);
         };
-        
-        // 2. 监听现代 Fetch
         var origFetch = window.fetch;
         window.fetch = function() {
             return origFetch.apply(this, arguments).then(function(res) {
-                res.clone().text().then(savePacket);
-                return res;
+                res.clone().text().then(savePacket); return res;
             });
         };
-
-        // 3. 监听直播专用的 WebSocket (极其重要！)
         var OrigWebSocket = window.WebSocket;
         window.WebSocket = function(url, protocols) {
             var ws = new OrigWebSocket(url, protocols);
@@ -395,52 +407,49 @@ def fetch_txwq_with_browser(input_str: str):
         """
         driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': intercept_js})
 
-        st.toast("全频段雷达已开启！正在监听网页中...")
+        st.toast("吸尘器已启动，正在疯狂吸取网页数据...")
         driver.get(full_share_url)
 
-        # 👑 Python 基地：耐心地在仓库里翻找真正的坐标数据
         raw_moves = None
-        for i in range(15):  # 给直播 15 秒钟的加载时间
+        for i in range(15):  # 轮询 15 秒
             time.sleep(1)
-            
-            # 把仓库里的所有数据包拿回来
             packets = driver.execute_script("return window.__txwq_packets;")
             
-            # 挨个拆包检查，找到真货立马停手
+            # 👑 用 Python 的 X 光眼扫描每一个吸回来的包裹
             for packet in packets:
                 try:
                     data = json.loads(packet)
-                    moves = data.get("chess") or data.get("game_data")
-                    # 只有包含实际坐标 (长度 > 0) 的包才是真包！
-                    if moves and isinstance(moves, list) and len(moves) > 0:
+                    moves = find_moves_in_data(data) # 盲搜！不看字段名！
+                    if moves:
                         raw_moves = moves
                         break 
                 except: continue
             
             if raw_moves:
-                st.toast(f"🎉 破案了！在第 {i+1} 秒捕获到了真实的坐标数据！")
+                st.toast(f"🎉 破防了！在第 {i+1} 秒强行提取到隐形坐标数据！")
                 break
         
         if not raw_moves:
-            return None, "❌ 监听了15秒，抓到了数据包，但全部是系统心跳或基础信息，未发现有效棋谱。可能对局刚开始，双方还未落子。"
+            return None, "❌ 吸取了所有数据包，用X光透视也未发现任何疑似坐标的数组。此棋局的数据可能采用了二进制加密流。"
 
         # 组装 SGF
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Radar_Live]DT[{datetime.date.today()}]"
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Vacuum_Live]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         for move in raw_moves:
             try:
-                c = "B" if move[0] == 0 else "W"
+                # 盲搜出的数组格式通常是 [颜色, 步数, X, Y]
+                color = "B" if move[0] == 0 else "W"
                 x, y = int(move[-2]), int(move[-1])
                 if 0 <= x <= 18 and 0 <= y <= 18:
-                    sgf_moves += f";{c}[{num_to_sgf(x)}{num_to_sgf(y)}]"
+                    sgf_moves += f";{color}[{num_to_sgf(x)}{num_to_sgf(y)}]"
                     move_count += 1
             except: continue
 
-        return sgf_header + sgf_moves + ")", f"✅ 大获全胜！成功从 {len(packets)} 个混淆数据包中提取出真实棋谱。当前第 {move_count} 手。"
+        return sgf_header + sgf_moves + ")", f"✅ 盲搜绝杀！无视腾讯字段名加密，成功提取第 {move_count} 手！"
 
     except Exception as e:
-        return None, f"❌ 雷达异常: {str(e)}"
+        return None, f"❌ 吸尘器异常: {str(e)}"
     finally:
         if driver:
             driver.quit()
