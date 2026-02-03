@@ -319,16 +319,16 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (终极移花接木：Cookie 转移版) ---
+# --- 腾讯围棋抓取工具 (终极绝杀：网络嗅探版) ---
 import datetime
 import json
 import time
-import requests
 from urllib.parse import urlparse, parse_qs
 import streamlit as st
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
 
 def num_to_sgf(n):
     return chr(ord('a') + n)
@@ -355,48 +355,52 @@ def fetch_txwq_with_browser(input_str: str):
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
+    # 👑 终极核心：开启 Chrome 的 F12 底层网络监听权限
+    chrome_options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
     driver = None
-    extracted_cookies = {}
+    target_request_id = None
+    raw_json_text = None
     
     try:
         driver = webdriver.Chrome(options=chrome_options)
         
-        st.toast("正在云端生成合法指纹 Cookie...")
+        st.toast("正在云端加载棋盘...")
         driver.get(full_share_url)
-        time.sleep(4)
+        time.sleep(5) # 等待 5 秒，确保棋盘完全画出
 
-        st.toast("指纹提取成功，正在移交 Python 接管...")
-        for cookie in driver.get_cookies():
-            extracted_cookies[cookie['name']] = cookie['value']
-
-    except Exception as e:
-        return None, f"❌ 浏览器启动异常: {str(e)}"
-    finally:
-        if driver is not None:
-            driver.quit()
-
-    # Python 接管下载
-    api_url = f"https://h5.txwq.qq.com/qqgameweiqi/wechat/urldataget?chessid={chessid}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": full_share_url,
-        "Accept": "application/json, text/plain, */*"
-    }
-
-    try:
-        resp = requests.get(api_url, headers=headers, cookies=extracted_cookies, timeout=10)
+        st.toast("棋盘加载完毕！正在从浏览器内存中拦截数据包...")
         
-        if not resp.text.strip():
-            return None, "❌ Python 接管请求后返回为空，Cookie 可能无效。"
+        # 👑 终极技术：分析浏览器的性能日志，找出那个成功的接口
+        logs = driver.get_log("performance")
+        for entry in logs:
+            try:
+                message = json.loads(entry["message"])["message"]
+                # 寻找网络请求的响应记录
+                if message["method"] == "Network.responseReceived":
+                    url = message["params"]["response"]["url"]
+                    if "wechat/urldataget" in url and chessid in url:
+                        target_request_id = message["params"]["requestId"]
+                        break
+            except: continue
 
-        live_data = resp.json()
+        # 👑 调用底层 CDP 协议，直接从浏览器缓存里“提货”
+        if target_request_id:
+            response_body = driver.execute_cdp_cmd("Network.getResponseBody", {"requestId": target_request_id})
+            raw_json_text = response_body["body"]
+
+        if not raw_json_text:
+            return None, "❌ 嗅探失败：未在浏览器网络日志中找到该对局的数据包。"
+
+        live_data = json.loads(raw_json_text)
         raw_moves = live_data.get("chess") or live_data.get("game_data")
 
         if not raw_moves:
-            return None, "❌ 获取数据成功，但未找到坐标（可能对局刚创建）。"
+            return None, "❌ 数据包拦截成功，但内部无棋谱（可能对局刚创建）。"
 
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Python_Live]DT[{datetime.date.today()}]"
+        # 组装 SGF
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Sniffer_Live]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         for move in raw_moves:
@@ -408,10 +412,13 @@ def fetch_txwq_with_browser(input_str: str):
                     move_count += 1
             except: continue
 
-        return sgf_header + sgf_moves + ")", f"✅ 移花接木成功！当前进行至第 {move_count} 手。"
+        return sgf_header + sgf_moves + ")", f"✅ 极限反杀！成功拦截网络数据包。当前进行至第 {move_count} 手。"
 
     except Exception as e:
-        return None, f"❌ Python 下载异常: {str(e)}"
+        return None, f"❌ 嗅探异常: {str(e)}"
+    finally:
+        if driver:
+            driver.quit()
 # ===============================
 # 页面主逻辑
 # ===============================
