@@ -1,6 +1,7 @@
 import os
 import datetime
 import requests
+from urllib.parse import urlparse, parse_qs  # 👈 新增：用于解析输入的长链接
 import altair as alt
 import pandas as pd
 import streamlit as st
@@ -318,23 +319,91 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 ---
-def fetch_txwq_content(chessid: str):
-    """从腾讯接口获取 SGF 内容"""
-    url = "http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess"
-    data = {"chessid": chessid}
+# --- 腾讯围棋抓取工具 (智能版) ---
+def num_to_sgf(n):
+    """辅助函数：将数字坐标转为 SGF 字母坐标 (0->a, 1->b)"""
+    return chr(ord('a') + n)
+
+def fetch_txwq_smart(input_str: str):
+    """
+    智能抓取：同时支持历史棋谱和直播棋谱（通过模拟游客 Session 绕过限制）
+    返回: (sgf_text, status_message)
+    """
+    input_str = input_str.strip()
+    chessid = input_str
+
+    # 1. 智能提取 ID（如果用户输入的是一串很长的 H5 链接）
+    if "txwqshare" in input_str or "h5.txwq.qq.com" in input_str:
+        parsed = urlparse(input_str)
+        params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        chessid = params.get("chessid", input_str)
+
+    # ==========================================
+    # 策略 A：尝试历史库接口 (已完结的对局)
+    # ==========================================
+    history_url = "http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess"
     try:
-        resp = requests.post(url, data=data, timeout=10)
-        resp.raise_for_status()
+        resp = requests.post(history_url, data={"chessid": chessid}, timeout=8)
         js = resp.json()
         if js.get("result") == 0:
-            return js.get("chess")
-        else:
-            st.error(f"API 报错: {js.get('resultstr')}")
-            return None
+            return js.get("chess") or js.get("game_data"), "✅ 历史棋谱抓取成功！"
+    except:
+        pass  # 历史库失败，静默进入直播抓取通道
+
+    # ==========================================
+    # 策略 B：尝试直播接口 (未完结的对局 - 游客模式)
+    # ==========================================
+    session = requests.Session()
+    
+    # 伪装成普通手机浏览器
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh-Hans;q=0.9",
+        "Connection": "keep-alive"
+    }
+    
+    share_url = f"https://h5.txwq.qq.com/txwqshare/index.html?chessid={chessid}"
+    api_url = f"https://h5.txwq.qq.com/cgi-bin/CommonMobileCGI/urldataget?chessid={chessid}"
+
+    try:
+        # 步骤 1: 访问分享页，诱骗服务器发给 Session 一个临时 Cookie
+        session.get(share_url, headers=headers, timeout=5)
+
+        # 步骤 2: 更新请求头，加上 Referer，去请求直播数据
+        headers.update({
+            "Referer": share_url,
+            "Accept": "application/json, text/plain, */*"
+        })
+        live_resp = session.get(api_url, headers=headers, timeout=10)
+
+        if not live_resp.text.strip():
+            return None, "❌ 抓取失败：服务器未返回数据，请检查该棋局是否有效。"
+
+        live_data = live_resp.json()
+        raw_moves = live_data.get("chess") or live_data.get("game_data")
+
+        if not raw_moves:
+            return None, "❌ 抓取失败：未找到棋谱坐标，棋局可能尚未开始。"
+
+        # 步骤 3: 坐标数组转换为标准 SGF 格式
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Cloud_Fetch]DT[{datetime.date.today()}]"
+        sgf_moves = ""
+        move_count = 0
+        for move in raw_moves:
+            try:
+                # 腾讯坐标格式 [颜色, 步数, X, Y]，0黑1白
+                color = "B" if move[0] == 0 else "W"
+                x, y = int(move[-2]), int(move[-1])
+                if 0 <= x <= 18 and 0 <= y <= 18:
+                    sgf_moves += f";{color}[{num_to_sgf(x)}{num_to_sgf(y)}]"
+                    move_count += 1
+            except: continue
+
+        return sgf_header + sgf_moves + ")", f"✅ 直播抓取成功（当前更新至第 {move_count} 手）"
+
     except Exception as e:
-        st.error(f"连接失败: {e}")
-        return None
+        return None, f"❌ 抓取异常: {str(e)}"
 
 # ===============================
 # 页面主逻辑
@@ -407,24 +476,29 @@ with st.sidebar:
     
     # 新增：腾讯围棋抓取小工具
     st.header("🛠 实用工具")
-    with st.expander("📥 腾讯围棋棋谱抓取"):
-        st.caption("输入对局 ID 即可提取 SGF 文件")
-        cid = st.text_input("Chess ID", placeholder="如: 1770092663030101341")
-        if st.button("获取并准备下载"):
+    with st.expander("📥 腾讯围棋棋谱抓取 (含直播)"):
+        st.caption("支持输入 棋谱 ID 或 直播分享链接")
+        cid = st.text_input("输入内容", placeholder="ID / H5 链接")
+        
+        if st.button("开始抓取"):
             if cid:
-                with st.spinner("抓取中..."):
-                    sgf_text = fetch_txwq_content(cid.strip())
+                with st.spinner("正在探查棋谱状态..."):
+                    # 调用新的智能函数
+                    sgf_text, status_msg = fetch_txwq_smart(cid)
+                    
                     if sgf_text:
-                        st.success("抓取成功！")
+                        st.success(status_msg)
                         # 提供下载按钮
                         st.download_button(
                             label="💾 点击下载 SGF",
                             data=sgf_text,
-                            file_name=f"TXWQ_{cid}.sgf",
+                            file_name=f"TXWQ_{datetime.date.today()}.sgf",
                             mime="text/plain"
                         )
+                    else:
+                        st.error(status_msg)
             else:
-                st.warning("请输入有效 ID")
+                st.warning("总得填点什么吧？")
 
 # ========== 实时排行 & 多人 Elo 走势 ==========
 col_rank, col_trend = st.columns([1, 2])
