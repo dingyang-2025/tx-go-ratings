@@ -370,11 +370,12 @@ def fetch_txwq_with_browser(input_str: str):
         
         api_url = f"https://h5.txwq.qq.com/qqgameweiqi/wechat/urldataget?chessid={chessid}"
         
-        # 👑 终极技术：使用异步 Fetch API，完美绕过浏览器的同步锁
+        # 👑 终极技术：强制携带 Cookie 的异步 Fetch
         js_code = f"""
-        var done = arguments[arguments.length - 1];  // Selenium 异步回调接口
+        var done = arguments[arguments.length - 1];
         fetch('{api_url}', {{
             method: 'GET',
+            credentials: 'include',  // 👈 就是这句！强行带上云端浏览器刚生成的合法 Cookie
             headers: {{ 'Accept': 'application/json' }}
         }})
         .then(response => response.text())
