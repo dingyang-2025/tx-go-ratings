@@ -319,7 +319,7 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (防白屏终极版) ---
+# --- 腾讯围棋抓取工具 (特洛伊木马：JS 注入版) ---
 import datetime
 import json
 import time
@@ -328,7 +328,6 @@ import streamlit as st
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
 
 def num_to_sgf(n):
     return chr(ord('a') + n)
@@ -348,13 +347,12 @@ def fetch_txwq_with_browser(input_str: str):
     if not is_live_link:
         return None, "⚠️ 抓取直播需要完整的分享链接。"
 
-    # 👑 核心：Linux 云端无头浏览器的"防白屏"全套参数
+    # 保持防白屏的配置
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")  # 👈 必须禁用 GPU，否则云端必白屏
-    chrome_options.add_argument("--ignore-certificate-errors") # 👈 忽略 SSL 证书拦截
+    chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -362,39 +360,38 @@ def fetch_txwq_with_browser(input_str: str):
     try:
         driver = webdriver.Chrome(options=chrome_options)
         
-        st.toast("正在加载分享页生成指纹...")
+        # 👑 步骤 1：正常打开分享页，让腾讯的 JS 跑起来，渲染棋盘
+        st.toast("正在云端加载直播画面...")
         driver.get(full_share_url)
-        time.sleep(5) # 增加到 5 秒
+        time.sleep(4) # 必须等待，让页面生成合法的 _qimei_ 指纹
 
-        st.toast("正在请求直播数据...")
-        api_url = f"https://h5.txwq.qq.com/qqgameweiqi/wechat/urldataget?chessid={chessid}"
-        driver.get(api_url)
-        time.sleep(3) # 确保数据加载完毕
+        st.toast("潜入成功！正在页面内部提取棋谱...")
         
-        # 提取页面文本
-        try:
-            json_text = driver.find_element(By.TAG_NAME, "pre").text
-        except:
-            json_text = driver.find_element(By.TAG_NAME, "body").text
+        # 👑 步骤 2：特洛伊木马！在当前合法页面内注入 JS 请求数据
+        # 这样做会自动带上该页面所有合法的 Cookie 和 Header，WAF 完全无法察觉
+        api_url = f"https://h5.txwq.qq.com/qqgameweiqi/wechat/urldataget?chessid={chessid}"
+        
+        js_code = f"""
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', '{api_url}', false);  // 发送同步请求
+        xhr.send(null);
+        return xhr.responseText;
+        """
+        
+        # 执行 JS 并拿回结果
+        json_text = driver.execute_script(js_code)
 
-        # 🚨 调试模式：如果没抓到文本，直接把 HTML 源码也扒出来看！
-        if not json_text.strip():
-            raw_html = driver.page_source
-            screenshot = driver.get_screenshot_as_png()
-            st.error("❌ 依然未截取到明文数据。")
-            st.image(screenshot, caption="浏览器截图")
-            with st.expander("🕵️‍♂️ 查看网页底层 HTML 源码 (一定有线索)"):
-                st.code(raw_html, language="html")
-            return None, "白屏了。请查看上方的 HTML 源码，看看服务器到底发回了什么。"
+        if not json_text or not json_text.strip():
+            return None, "❌ JS 注入执行成功，但未返回数据。棋局可能已过期。"
 
         live_data = json.loads(json_text)
         raw_moves = live_data.get("chess") or live_data.get("game_data")
 
         if not raw_moves:
-            return None, "❌ 无棋谱坐标，对局可能未开始。"
+            return None, "❌ 成功突破防御，但接口未返回棋谱步骤（游戏可能刚创建）。"
 
         # 组装 SGF
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Selenium_Live]DT[{datetime.date.today()}]"
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Trojan_Live]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         for move in raw_moves:
@@ -406,10 +403,10 @@ def fetch_txwq_with_browser(input_str: str):
                     move_count += 1
             except: continue
 
-        return sgf_header + sgf_moves + ")", f"✅ 核武级抓取成功！当前进行至第 {move_count} 手。"
+        return sgf_header + sgf_moves + ")", f"✅ 直播抓取成功！当前进行至第 {move_count} 手。"
 
     except Exception as e:
-        return None, f"❌ 浏览器异常: {str(e)}"
+        return None, f"❌ 注入异常: {str(e)}"
     finally:
         if driver:
             driver.quit()
