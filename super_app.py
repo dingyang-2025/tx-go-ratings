@@ -330,43 +330,41 @@ def num_to_sgf(n):
 # --- 修正后的直播抓取逻辑 ---
 def fetch_txwq_live_sgf(chessid: str):
     """
-    深度模拟 H5 浏览器请求，解决 400 和 JSON 解析错误
+    深度模拟 H5 请求，对齐 image_b787dd.jpg 和 image_b784db.jpg 中的细节
     """
-    # 1. 使用你在 image_b787dd.jpg 中发现的精确 URL
+    # 1. 使用你截图中的精确路径
     url = f"https://h5.txwq.qq.com/qqgameweiqi/wechat/urldataget?chessid={chessid}"
     
-    # 2. 精准还原 image_b784db.jpg 和 image_b787fc.jpg 中的请求头
+    # 2. 补全所有核心请求头
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
-        "Referer": "https://h5.txwq.qq.com/txwqshare/index.html",
+        "Referer": f"https://h5.txwq.qq.com/txwqshare/index.html?chessid={chessid}",
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Host": "h5.txwq.qq.com",
         "Connection": "keep-alive"
     }
     
     try:
-        # 注意：如果依然报错，说明腾讯强制校验了 Cookie。
-        # 由于 Cookie 是动态生成的，网页端（服务器）很难实时获取。
+        # 这里不带 Cookie 尝试，如果依然返回空，
+        # 则说明腾讯强制要求登录态，云端网页版基本无解（除非你手动把 Cookie 填进网页）。
         resp = requests.get(url, headers=headers, timeout=10)
         
+        # 调试信息：如果失败了，看看返回的是什么 HTML
         if resp.status_code != 200:
-            return None, f"服务器返回状态码 {resp.status_code}，可能需要登录 Cookie。"
+            return None, f"请求失败，状态码: {resp.status_code}"
             
-        # 针对 image_b77c99.png 的报错做防御
         content = resp.text.strip()
         if not content:
-            return None, "服务器返回内容为空，可能该对局尚未产生有效棋谱。"
+            return None, "服务器返回内容为空（大概率是因为缺少 Cookie 凭证）"
             
-        try:
-            data = resp.json()
-        except Exception:
-            return None, "数据解析失败。腾讯可能开启了反爬验证，要求有效的 Cookie 才能查看直播。"
-
+        data = resp.json()
         raw_moves = data.get("chess") or data.get("game_data")
+        
         if not raw_moves:
-            return None, "成功连接但未发现棋谱坐标。请确认对局是否已开始。"
+            return None, "已连接但未获取到棋谱坐标。对局可能尚未开始或权限受限。"
 
-        # 3. 组装 SGF：腾讯直播坐标格式 [color, step, x, y]
+        # 组装 SGF
         sgf_header = f"(;GM[1]SZ[19]AP[TencentGo_Live]DT[{datetime.date.today()}]"
         sgf_moves = ""
         for move in raw_moves:
@@ -374,12 +372,12 @@ def fetch_txwq_live_sgf(chessid: str):
                 color = "B" if move[0] == 0 else "W"
                 x, y = int(move[-2]), int(move[-1])
                 if 0 <= x <= 18 and 0 <= y <= 18:
-                    sgf_moves += f";{color}[{num_to_sgf(x)}{num_to_sgf(y)}]"
+                    sgf_moves += f";{color}[{chr(97+x)}{chr(97+y)}]"
             except: continue
             
         return sgf_header + sgf_moves + ")", "live_success"
     except Exception as e:
-        return None, f"请求异常: {str(e)}"
+        return None, f"解析异常: {str(e)}"
 
 # --- 稍微优化一下主抓取器，增加超时容错 ---
 def fetch_txwq_content_pro(input_str: str):
