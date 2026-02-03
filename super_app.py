@@ -1,6 +1,7 @@
 import os
 import datetime
 import requests
+from urllib.parse import urlparse, parse_qs  # 新增：用于解析链接
 import altair as alt
 import pandas as pd
 import streamlit as st
@@ -319,21 +320,43 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
     return results
 
 # --- 腾讯围棋抓取工具 ---
-def fetch_txwq_content(chessid: str):
-    # 尝试 H5 专用的获取接口（可能支持实时）
-    url = "http://h5.txwq.qq.com/cgi-bin/CommonMobileCGI/TXWQGetChess"
-    data = {"chessid": chessid}
+def fetch_txwq_content_v2(input_str: str):
+    """
+    智能抓取：支持直接输入 ID 或 H5 分享链接
+    """
+    # 默认值
+    api_url = "http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess"
+    data = {"chessid": input_str.strip()}
+
+    # 如果输入的是 H5 链接，提取所有直播参数
+    if "txwqshare" in input_str:
+        parsed = urlparse(input_str)
+        params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        # 直播专用接口和参数
+        api_url = "http://h5.txwq.qq.com/cgi-bin/CommonMobileCGI/TXWQGetChess"
+        data = {
+            "svrid": params.get("svrid"),
+            "svrtype": params.get("svrtype"),
+            "roomid": params.get("roomid"),
+            "createtime": params.get("createtime"),
+            "chessid": params.get("chessid"),
+            "boardsize": "19"
+        }
+
     try:
-        resp = requests.post(url, data=data, timeout=10)
+        # 发送请求
+        resp = requests.post(api_url, data=data, timeout=10)
         resp.raise_for_status()
         js = resp.json()
+        
         if js.get("result") == 0:
-            return js.get("chess")
+            # 注意：直播返回的字段名可能叫 'chess' 或 'game_data'
+            return js.get("chess") or js.get("game_data")
         else:
-            st.error(f"API 报错: {js.get('resultstr')}")
+            st.error(f"腾讯 API 返回错误: {js.get('resultstr')}")
             return None
     except Exception as e:
-        st.error(f"连接失败: {e}")
+        st.error(f"抓取失败: {e}")
         return None
 
 # ===============================
