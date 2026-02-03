@@ -1,7 +1,7 @@
 import os
 import datetime
 import requests
-from urllib.parse import urlparse, parse_qs  # 👈 新增：用于解析输入的长链接
+from urllib.parse import urlparse, parse_qs  # 👈 新增：用于解析直播长链接
 import altair as alt
 import pandas as pd
 import streamlit as st
@@ -319,88 +319,89 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (智能版) ---
+# --- 腾讯围棋抓取工具 (终极云端直播兼容版) ---
 def num_to_sgf(n):
     """辅助函数：将数字坐标转为 SGF 字母坐标 (0->a, 1->b)"""
     return chr(ord('a') + n)
 
-def fetch_txwq_smart(input_str: str):
+def fetch_txwq_ultimate(input_str: str):
     """
-    智能抓取：同时支持历史棋谱和直播棋谱（通过模拟游客 Session 绕过限制）
-    返回: (sgf_text, status_message)
+    终极抓取器：利用 PHPSESSID 漏洞，纯云端抓取直播棋谱
     """
     input_str = input_str.strip()
     chessid = input_str
-
-    # 1. 智能提取 ID（如果用户输入的是一串很长的 H5 链接）
+    
+    # 1. 完整解析用户输入的超级链接
+    is_live_link = False
+    full_share_url = input_str
     if "txwqshare" in input_str or "h5.txwq.qq.com" in input_str:
+        is_live_link = True
         parsed = urlparse(input_str)
         params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
         chessid = params.get("chessid", input_str)
 
-    # ==========================================
-    # 策略 A：尝试历史库接口 (已完结的对局)
-    # ==========================================
-    history_url = "http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess"
+    # ====================================================
+    # 策略 A：历史棋谱 (POST接口，用于已完结对局)
+    # ====================================================
     try:
-        resp = requests.post(history_url, data={"chessid": chessid}, timeout=8)
+        resp = requests.post("http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess", data={"chessid": chessid}, timeout=5)
         js = resp.json()
         if js.get("result") == 0:
             return js.get("chess") or js.get("game_data"), "✅ 历史棋谱抓取成功！"
-    except:
-        pass  # 历史库失败，静默进入直播抓取通道
+    except: pass # 如果失败或报 DB Failed，静默切换到直播策略
 
-    # ==========================================
-    # 策略 B：尝试直播接口 (未完结的对局 - 游客模式)
-    # ==========================================
+    # ====================================================
+    # 策略 B：直播棋谱 (完美复现你的无痕浏览器请求)
+    # ====================================================
+    if not is_live_link:
+        return None, "⚠️ 抓取直播需要输入完整的分享链接（包含 svrid, roomid 等参数），只有 ID 不够哦。"
+
     session = requests.Session()
     
-    # 伪装成普通手机浏览器
+    # 精准伪装成你截图里的浏览器头
     headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh-Hans;q=0.9",
         "Connection": "keep-alive"
     }
-    
-    share_url = f"https://h5.txwq.qq.com/txwqshare/index.html?chessid={chessid}"
-    api_url = f"https://h5.txwq.qq.com/cgi-bin/CommonMobileCGI/urldataget?chessid={chessid}"
 
     try:
-        # 步骤 1: 访问分享页，诱骗服务器发给 Session 一个临时 Cookie
-        session.get(share_url, headers=headers, timeout=5)
+        # 核心突破：访问完整链接，强迫腾讯下发 PHPSESSID
+        session.get(full_share_url, headers=headers, timeout=5)
 
-        # 步骤 2: 更新请求头，加上 Referer，去请求直播数据
+        # 准备去拿直播数据，更新 Referer 为完整链接
         headers.update({
-            "Referer": share_url,
+            "Referer": full_share_url,
             "Accept": "application/json, text/plain, */*"
         })
+        
+        # 访问你截图里的真实数据接口
+        api_url = f"https://h5.txwq.qq.com/qqgameweiqi/wechat/urldataget?chessid={chessid}"
         live_resp = session.get(api_url, headers=headers, timeout=10)
 
         if not live_resp.text.strip():
-            return None, "❌ 抓取失败：服务器未返回数据，请检查该棋局是否有效。"
+            return None, "❌ 抓取失败：腾讯拒绝下发数据，可能是链接已过期。"
 
         live_data = live_resp.json()
         raw_moves = live_data.get("chess") or live_data.get("game_data")
 
         if not raw_moves:
-            return None, "❌ 抓取失败：未找到棋谱坐标，棋局可能尚未开始。"
+            return None, "❌ 连接成功但无棋谱坐标，对局可能未开始。"
 
-        # 步骤 3: 坐标数组转换为标准 SGF 格式
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Cloud_Fetch]DT[{datetime.date.today()}]"
+        # 组装 SGF
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Cloud_Live]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         for move in raw_moves:
             try:
-                # 腾讯坐标格式 [颜色, 步数, X, Y]，0黑1白
-                color = "B" if move[0] == 0 else "W"
+                c = "B" if move[0] == 0 else "W"
                 x, y = int(move[-2]), int(move[-1])
                 if 0 <= x <= 18 and 0 <= y <= 18:
-                    sgf_moves += f";{color}[{num_to_sgf(x)}{num_to_sgf(y)}]"
+                    sgf_moves += f";{c}[{num_to_sgf(x)}{num_to_sgf(y)}]"
                     move_count += 1
             except: continue
 
-        return sgf_header + sgf_moves + ")", f"✅ 直播抓取成功（当前更新至第 {move_count} 手）"
+        return sgf_header + sgf_moves + ")", f"✅ 直播抓取成功！当前进行至第 {move_count} 手。"
 
     except Exception as e:
         return None, f"❌ 抓取异常: {str(e)}"
@@ -474,17 +475,16 @@ with st.sidebar:
     
     st.divider()  # 加一条分割线
     
-    # 新增：腾讯围棋抓取小工具
     st.header("🛠 实用工具")
     with st.expander("📥 腾讯围棋棋谱抓取 (含直播)"):
-        st.caption("支持输入 棋谱 ID 或 直播分享链接")
-        cid = st.text_input("输入内容", placeholder="ID / H5 链接")
+        st.caption("提示：抓取**历史对局**可直接输入 ID；抓取**直播对局**请粘贴**完整分享链接**。")
+        cid = st.text_input("输入内容", placeholder="例如: https://h5.txwq.qq.com/txwqshare/index.html?...")
         
         if st.button("开始抓取"):
             if cid:
                 with st.spinner("正在探查棋谱状态..."):
-                    # 调用新的智能函数
-                    sgf_text, status_msg = fetch_txwq_smart(cid)
+                    # 调用新的终极版函数
+                    sgf_text, status_msg = fetch_txwq_ultimate(cid.strip())
                     
                     if sgf_text:
                         st.success(status_msg)
