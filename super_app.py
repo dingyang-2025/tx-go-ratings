@@ -1,14 +1,13 @@
 import os
 import datetime
-import requests  # 解决 image_a72edd.png 的导入问题
-from urllib.parse import urlparse, parse_qs
+import requests
 import altair as alt
 import pandas as pd
 import streamlit as st
 
 # 可选：按中文拼音排序
 try:
-    from pypinyin import lazy_pinyin
+    from pypinyin import lazy_pinyin  # 需要在 requirements.txt 里加 pypinyin
 except ImportError:
     lazy_pinyin = None
 
@@ -319,99 +318,24 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# ===============================
-#  腾讯围棋（野狐）抓取核心引擎
-# ===============================
-
-def num_to_sgf(n):
-    """将数字坐标转换为 SGF 字母坐标 (0->a, 18->s)"""
-    return chr(ord('a') + n)
-
-# --- 修正后的直播抓取逻辑 ---
-def fetch_txwq_live_sgf(chessid: str):
-    """
-    深度模拟 H5 请求，对齐 image_b787dd.jpg 和 image_b784db.jpg 中的细节
-    """
-    # 1. 使用你截图中的精确路径
-    url = f"https://h5.txwq.qq.com/qqgameweiqi/wechat/urldataget?chessid={chessid}"
-    
-    # 2. 补全所有核心请求头
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
-        "Referer": f"https://h5.txwq.qq.com/txwqshare/index.html?chessid={chessid}",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Host": "h5.txwq.qq.com",
-        "Connection": "keep-alive"
-    }
-    
+# --- 腾讯围棋抓取工具 ---
+def fetch_txwq_content(chessid: str):
+    """从腾讯接口获取 SGF 内容"""
+    url = "http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess"
+    data = {"chessid": chessid}
     try:
-        # 这里不带 Cookie 尝试，如果依然返回空，
-        # 则说明腾讯强制要求登录态，云端网页版基本无解（除非你手动把 Cookie 填进网页）。
-        resp = requests.get(url, headers=headers, timeout=10)
-        
-        # 调试信息：如果失败了，看看返回的是什么 HTML
-        if resp.status_code != 200:
-            return None, f"请求失败，状态码: {resp.status_code}"
-            
-        content = resp.text.strip()
-        if not content:
-            return None, "服务器返回内容为空（大概率是因为缺少 Cookie 凭证）"
-            
-        data = resp.json()
-        raw_moves = data.get("chess") or data.get("game_data")
-        
-        if not raw_moves:
-            return None, "已连接但未获取到棋谱坐标。对局可能尚未开始或权限受限。"
-
-        # 组装 SGF
-        sgf_header = f"(;GM[1]SZ[19]AP[TencentGo_Live]DT[{datetime.date.today()}]"
-        sgf_moves = ""
-        for move in raw_moves:
-            try:
-                color = "B" if move[0] == 0 else "W"
-                x, y = int(move[-2]), int(move[-1])
-                if 0 <= x <= 18 and 0 <= y <= 18:
-                    sgf_moves += f";{color}[{chr(97+x)}{chr(97+y)}]"
-            except: continue
-            
-        return sgf_header + sgf_moves + ")", "live_success"
-    except Exception as e:
-        return None, f"解析异常: {str(e)}"
-
-# --- 稍微优化一下主抓取器，增加超时容错 ---
-def fetch_txwq_content_pro(input_str: str):
-    input_str = input_str.strip()
-    chessid = input_str
-
-    if "txwqshare" in input_str or "h5.txwq.qq.com" in input_str:
-        parsed = urlparse(input_str)
-        params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-        chessid = params.get("chessid", input_str)
-
-    # A 策略：历史库 (POST)
-    api_url = "http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess"
-    try:
-        resp = requests.post(api_url, data={"chessid": chessid}, timeout=8)
+        resp = requests.post(url, data=data, timeout=10)
         resp.raise_for_status()
         js = resp.json()
-        
         if js.get("result") == 0:
-            return js.get("chess") or js.get("game_data"), "success"
-        
-        # 如果历史库报 DB Failed，说明是直播
-        if "DB Failed" in js.get("resultstr", "") or js.get("result") != 0:
-            live_sgf, err = fetch_txwq_live_sgf(chessid)
-            if live_sgf:
-                return live_sgf, "live"
-            else:
-                return None, err
-        return None, js.get("resultstr")
+            return js.get("chess")
+        else:
+            st.error(f"API 报错: {js.get('resultstr')}")
+            return None
     except Exception as e:
-        # 兜底：直接尝试直播接口
-        live_sgf, err = fetch_txwq_live_sgf(chessid)
-        if live_sgf: return live_sgf, "live"
-        return None, f"历史库访问失败且直播通道报错: {str(e)}"
+        st.error(f"连接失败: {e}")
+        return None
+
 # ===============================
 # 页面主逻辑
 # ===============================
@@ -479,36 +403,28 @@ with st.sidebar:
                 st.success(f"已保存：{p1} vs {p2}（胜者：{final_winner}）")
                 st.rerun()
     
-    st.divider()
+    st.divider()  # 加一条分割线
+    
+    # 新增：腾讯围棋抓取小工具
     st.header("🛠 实用工具")
     with st.expander("📥 腾讯围棋棋谱抓取"):
-        st.caption("支持 棋谱ID 或 直播分享链接。直播对局将自动转换为标准 SGF。")
-        cid = st.text_input("输入内容", placeholder="ID 或 H5 链接", key="txwq_input_new")
-        
-        if st.button("一键抓取棋谱"):
+        st.caption("输入对局 ID 即可提取 SGF 文件")
+        cid = st.text_input("Chess ID", placeholder="如: 1770092663030101341")
+        if st.button("获取并准备下载"):
             if cid:
-                with st.spinner("正在解析对局数据..."):
-                    sgf_data, status = fetch_txwq_content_pro(cid)
-                    
-                    if sgf_data:
-                        if status == "live":
-                            st.success("✅ 成功从直播通道抓取并转换！")
-                        else:
-                            st.success("✅ 成功从历史库抓取！")
-                            
+                with st.spinner("抓取中..."):
+                    sgf_text = fetch_txwq_content(cid.strip())
+                    if sgf_text:
+                        st.success("抓取成功！")
+                        # 提供下载按钮
                         st.download_button(
-                            label="💾 下载 SGF 棋谱",
-                            data=str(sgf_data),
-                            file_name=f"TXWQ_{datetime.date.today()}.sgf",
+                            label="💾 点击下载 SGF",
+                            data=sgf_text,
+                            file_name=f"TXWQ_{cid}.sgf",
                             mime="text/plain"
                         )
-                        # 预览前几行（可选）
-                        with st.expander("查看预览"):
-                            st.code(sgf_data[:200] + "...", language="sgf")
-                    else:
-                        st.error(f"抓取失败：{status}")
             else:
-                st.warning("请输入 ID 或链接")
+                st.warning("请输入有效 ID")
 
 # ========== 实时排行 & 多人 Elo 走势 ==========
 col_rank, col_trend = st.columns([1, 2])
