@@ -320,18 +320,20 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
     return results
 
 # --- 腾讯围棋抓取工具 (终极云端直播兼容版) ---
+import requests
+import datetime
+from urllib.parse import urlparse, parse_qs
+
 def num_to_sgf(n):
-    """辅助函数：将数字坐标转为 SGF 字母坐标 (0->a, 1->b)"""
     return chr(ord('a') + n)
 
 def fetch_txwq_ultimate(input_str: str):
     """
-    终极抓取器：利用 PHPSESSID 漏洞，纯云端抓取直播棋谱
+    终极抓取器：通过 getTokens.php 真实模拟 H5 初始化全流程
     """
     input_str = input_str.strip()
     chessid = input_str
     
-    # 1. 完整解析用户输入的超级链接
     is_live_link = False
     full_share_url = input_str
     if "txwqshare" in input_str or "h5.txwq.qq.com" in input_str:
@@ -348,47 +350,44 @@ def fetch_txwq_ultimate(input_str: str):
         js = resp.json()
         if js.get("result") == 0:
             return js.get("chess") or js.get("game_data"), "✅ 历史棋谱抓取成功！"
-    except: pass # 如果失败或报 DB Failed，静默切换到直播策略
+    except: pass
 
     # ====================================================
-    # 策略 B：直播棋谱 (完美复现你的无痕浏览器请求)
+    # 策略 B：直播棋谱 (完美复现 H5 页面加载过程)
     # ====================================================
     if not is_live_link:
-        return None, "⚠️ 抓取直播需要输入完整的分享链接（包含 svrid, roomid 等参数），只有 ID 不够哦。"
+        return None, "⚠️ 抓取直播需要输入包含 svrid, roomid 等参数的完整分享链接。"
 
     session = requests.Session()
     
-    # 精准伪装成你截图里的浏览器头
+    # 1. 基础浏览器头
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Connection": "keep-alive"
+        "Accept": "application/json, text/plain, */*",
+        "Connection": "keep-alive",
+        "Referer": full_share_url
     }
 
     try:
-        # 核心突破：访问完整链接，强迫腾讯下发 PHPSESSID
-        session.get(full_share_url, headers=headers, timeout=5)
+        # 👑 核心突破步骤 1：访问令牌接口，强迫服务器生成 PHPSESSID
+        token_url = "https://h5.txwq.qq.com/qqgameweiqi/wechat/getTokens.php"
+        session.get(token_url, headers=headers, timeout=5)
 
-        # 准备去拿直播数据，更新 Referer 为完整链接
-        headers.update({
-            "Referer": full_share_url,
-            "Accept": "application/json, text/plain, */*"
-        })
-        
-        # 访问你截图里的真实数据接口
+        # 👑 核心突破步骤 2：带着刚拿到的 Cookie 去请求真实数据
         api_url = f"https://h5.txwq.qq.com/qqgameweiqi/wechat/urldataget?chessid={chessid}"
         live_resp = session.get(api_url, headers=headers, timeout=10)
 
+        # 验证是否再次被拦截
         if not live_resp.text.strip():
-            return None, "❌ 抓取失败：腾讯拒绝下发数据，可能是链接已过期。"
+            return None, "❌ 抓取失败：接口响应为空。腾讯似乎在凌晨进行了接口维护或变更。"
 
         live_data = live_resp.json()
         raw_moves = live_data.get("chess") or live_data.get("game_data")
 
         if not raw_moves:
-            return None, "❌ 连接成功但无棋谱坐标，对局可能未开始。"
+            return None, "❌ 连接成功但无棋谱坐标，对局可能刚刚建立，还未落子。"
 
-        # 组装 SGF
+        # 3. 组装 SGF
         sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Cloud_Live]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
