@@ -327,34 +327,38 @@ def num_to_sgf(n):
     """将数字坐标转换为 SGF 字母坐标 (0->a, 18->s)"""
     return chr(ord('a') + n)
 
+# --- 修正后的直播抓取逻辑 ---
 def fetch_txwq_live_sgf(chessid: str):
     """
-    针对直播对局的抓取与转换 (解析 urldataget 接口)
+    针对直播对局的抓取与转换 (增加请求头以绕过 400 错误)
     """
-    # 这里的接口地址来源于你在 image_b71096.jpg 中的 F12 发现
-    url = f"http://h5.txwq.qq.com/cgi-bin/CommonMobileCGI/urldataget?chessid={chessid}"
+    # 强制使用 HTTPS 并添加伪装请求头
+    url = f"https://h5.txwq.qq.com/cgi-bin/CommonMobileCGI/urldataget?chessid={chessid}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Mobile/15E148 Safari/604.1",
+        "Referer": "https://h5.txwq.qq.com/txwqshare/index.html",
+        "Origin": "https://h5.txwq.qq.com"
+    }
+    
     try:
-        resp = requests.get(url, timeout=10)
+        # 使用 GET 请求并带上伪装头
+        resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         
-        # 提取坐标数组
         raw_moves = data.get("chess") or data.get("game_data")
         if not raw_moves:
-            return None, "拿到数据但未发现棋谱坐标内容。"
+            return None, "拿到数据但未发现棋谱坐标。可能是对局刚开始，暂无步数。"
 
-        # 组装 SGF 头部
         sgf_header = f"(;GM[1]SZ[19]DT[{datetime.date.today()}]AP[TencentGo_Live]PC[野狐围棋]"
         sgf_moves = ""
         
-        # 转换坐标 (数据格式通常为 [颜色, 步数, X, Y])
         for move in raw_moves:
             try:
                 # 腾讯 H5 逻辑：0为黑，1为白
                 color = "B" if move[0] == 0 else "W"
-                # 获取最后两个作为坐标
+                # 提取坐标数组中的 X, Y (通常是最后两个数值)
                 x, y = int(move[-2]), int(move[-1])
-                # 过滤越界
                 if 0 <= x <= 18 and 0 <= y <= 18:
                     sgf_moves += f";{color}[{num_to_sgf(x)}{num_to_sgf(y)}]"
             except:
@@ -362,47 +366,42 @@ def fetch_txwq_live_sgf(chessid: str):
                 
         return sgf_header + sgf_moves + ")", None
     except Exception as e:
+        # 捕获 400 及其它请求错误
         return None, f"直播抓取失败: {str(e)}"
 
+# --- 稍微优化一下主抓取器，增加超时容错 ---
 def fetch_txwq_content_pro(input_str: str):
-    """
-    全能抓取器：支持历史 ID、直播链接及自动降级处理
-    """
     input_str = input_str.strip()
     chessid = input_str
 
-    # 如果是链接，提取 chessid
     if "txwqshare" in input_str or "h5.txwq.qq.com" in input_str:
         parsed = urlparse(input_str)
         params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
         chessid = params.get("chessid", input_str)
 
-    # 策略 A：尝试历史库接口
+    # A 策略：历史库 (POST)
     api_url = "http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess"
-    payload = {"chessid": chessid}
-
     try:
-        resp = requests.post(api_url, data=payload, timeout=8)
+        resp = requests.post(api_url, data={"chessid": chessid}, timeout=8)
         resp.raise_for_status()
         js = resp.json()
         
         if js.get("result") == 0:
             return js.get("chess") or js.get("game_data"), "success"
         
-        # 策略 B：如果历史库报 DB Failed (image_b70cf8)，则尝试直播接口
-        if "DB Failed" in js.get("resultstr", ""):
-            st.info("检测到非完结对局，正在尝试直播抓取通道...")
+        # 如果历史库报 DB Failed，说明是直播
+        if "DB Failed" in js.get("resultstr", "") or js.get("result") != 0:
             live_sgf, err = fetch_txwq_live_sgf(chessid)
             if live_sgf:
                 return live_sgf, "live"
             else:
                 return None, err
-        else:
-            return None, js.get("resultstr")
-            
+        return None, js.get("resultstr")
     except Exception as e:
-        return None, f"网络错误: {str(e)}"
-
+        # 兜底：直接尝试直播接口
+        live_sgf, err = fetch_txwq_live_sgf(chessid)
+        if live_sgf: return live_sgf, "live"
+        return None, f"历史库访问失败且直播通道报错: {str(e)}"
 # ===============================
 # 页面主逻辑
 # ===============================
