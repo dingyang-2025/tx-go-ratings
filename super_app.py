@@ -319,7 +319,7 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (终极吸尘器：盲搜透视版) ---
+# --- 腾讯围棋抓取工具 (终极返璞归真：JS 内存扫描版) ---
 import datetime
 import json
 import time
@@ -331,26 +331,6 @@ from selenium.webdriver.chrome.options import Options
 
 def num_to_sgf(n):
     return chr(ord('a') + n)
-
-def find_moves_in_data(obj):
-    """
-    X光透视函数：不看字段名，递归扫描 JSON，寻找符合“围棋坐标”特征的数组
-    特征：[[0, 1, 15, 16], [1, 2, 4, 3], ...]
-    """
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if isinstance(v, list) and len(v) > 0:
-                first = v[0]
-                # 命中特征：列表的第一个元素也是列表，且包含 >=4 个数字
-                if isinstance(first, list) and len(first) >= 4 and all(isinstance(i, (int, float)) for i in first):
-                    return v # 找到真货！
-            res = find_moves_in_data(v)
-            if res: return res
-    elif isinstance(obj, list):
-        for item in obj:
-            res = find_moves_in_data(item)
-            if res: return res
-    return None
 
 def fetch_txwq_with_browser(input_str: str):
     input_str = input_str.strip()
@@ -379,77 +359,84 @@ def fetch_txwq_with_browser(input_str: str):
     try:
         driver = webdriver.Chrome(options=chrome_options)
         
-        # 👑 吸尘器模式：取消所有关键字过滤，只要是 JSON 文本，统统吸回来！
-        intercept_js = """
-        window.__txwq_packets = [];
-        function savePacket(data) {
-            if (typeof data === 'string' && data.includes('{') && data.length > 50) {
-                window.__txwq_packets.push(data);
-            }
-        }
-        var origOpen = XMLHttpRequest.prototype.open;
-        XMLHttpRequest.prototype.open = function() {
-            this.addEventListener('load', function() { savePacket(this.responseText); });
-            origOpen.apply(this, arguments);
-        };
-        var origFetch = window.fetch;
-        window.fetch = function() {
-            return origFetch.apply(this, arguments).then(function(res) {
-                res.clone().text().then(savePacket); return res;
-            });
-        };
-        var OrigWebSocket = window.WebSocket;
-        window.WebSocket = function(url, protocols) {
-            var ws = new OrigWebSocket(url, protocols);
-            ws.addEventListener('message', function(event) { savePacket(event.data); });
-            return ws;
-        };
-        """
-        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': intercept_js})
-
-        st.toast("吸尘器已启动，正在疯狂吸取网页数据...")
+        st.toast("正在加载云端棋盘，请等待其完全渲染...")
         driver.get(full_share_url)
+        time.sleep(5) # 必须等 5 秒，确保棋盘上的黑白子全部画出
 
-        raw_moves = None
-        for i in range(15):  # 轮询 15 秒
-            time.sleep(1)
-            packets = driver.execute_script("return window.__txwq_packets;")
-            
-            # 👑 用 Python 的 X 光眼扫描每一个吸回来的包裹
-            for packet in packets:
-                try:
-                    data = json.loads(packet)
-                    moves = find_moves_in_data(data) # 盲搜！不看字段名！
-                    if moves:
-                        raw_moves = moves
-                        break 
-                except: continue
-            
-            if raw_moves:
-                st.toast(f"🎉 破防了！在第 {i+1} 秒强行提取到隐形坐标数据！")
-                break
+        st.toast("棋盘渲染完毕，正在执行 JS 内存深度扫描...")
+
+        # 👑 终极技术：JS 内存扫描器
+        # 既然棋子画出来了，那 window 对象里一定藏着棋谱数组。
+        # 我们不管变量叫什么，直接扫描内存中所有长度大于 10 的数组，寻找类似 [颜色, 落子手, X, Y] 的结构。
+        memory_scanner_js = """
+        function scanMemoryForGoMoves() {
+            let possibleMoves = [];
+            // 遍历全局 window 对象下的一级和二级变量
+            for (let key in window) {
+                try {
+                    let obj = window[key];
+                    if (!obj || typeof obj !== 'object') continue;
+                    
+                    // 检查 Vue/React 的内部状态树
+                    let target = obj;
+                    if (obj.__vue__) target = obj.__vue__; 
+                    
+                    // 深度转 JSON 字符串，直接用正则匹配腾讯的坐标格式特征
+                    // 特征：[0, 15, 3, 4] -> 黑棋(0)，第15手，坐标(3,4)
+                    let jsonStr = JSON.stringify(target);
+                    if (jsonStr && jsonStr.includes('[[') && jsonStr.length > 500) {
+                        // 暴力解析：找出所有可能是坐标的嵌套数组
+                        let arrays = JSON.parse(jsonStr);
+                        function findArray(node) {
+                            if (Array.isArray(node) && node.length > 10) {
+                                // 检查数组的第一个元素是否像一个坐标：长度>=4 的全是数字的数组
+                                let first = node[0];
+                                if (Array.isArray(first) && first.length >= 4 && typeof first[0] === 'number') {
+                                    possibleMoves = node;
+                                    return true; // 找到了！
+                                }
+                            }
+                            if (node && typeof node === 'object') {
+                                for (let k in node) {
+                                    if (findArray(node[k])) return true;
+                                }
+                            }
+                            return false;
+                        }
+                        findArray(arrays);
+                        if (possibleMoves.length > 0) break;
+                    }
+                } catch(e) {}
+            }
+            return possibleMoves;
+        }
+        return scanMemoryForGoMoves();
+        """
         
-        if not raw_moves:
-            return None, "❌ 吸取了所有数据包，用X光透视也未发现任何疑似坐标的数组。此棋局的数据可能采用了二进制加密流。"
+        # 让浏览器自己去搜查自己的内存
+        raw_moves = driver.execute_script(memory_scanner_js)
+
+        if not raw_moves or len(raw_moves) == 0:
+            return None, "❌ 内存扫描失败。已成功打开页面，但在浏览器内存中未提取到坐标数据。这可能是腾讯使用了 Canvas 强混淆。"
 
         # 组装 SGF
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Vacuum_Live]DT[{datetime.date.today()}]"
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Memory_Scanner]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         for move in raw_moves:
             try:
-                # 盲搜出的数组格式通常是 [颜色, 步数, X, Y]
-                color = "B" if move[0] == 0 else "W"
+                # 腾讯标准：[颜色, 步数, x, y]
+                c = "B" if move[0] == 0 else "W"
                 x, y = int(move[-2]), int(move[-1])
                 if 0 <= x <= 18 and 0 <= y <= 18:
-                    sgf_moves += f";{color}[{num_to_sgf(x)}{num_to_sgf(y)}]"
+                    sgf_moves += f";{c}[{num_to_sgf(x)}{num_to_sgf(y)}]"
                     move_count += 1
             except: continue
 
-        return sgf_header + sgf_moves + ")", f"✅ 盲搜绝杀！无视腾讯字段名加密，成功提取第 {move_count} 手！"
+        return sgf_header + sgf_moves + ")", f"✅ 内存扫描绝杀！绕过所有网络加密，直接从浏览器内存截获第 {move_count} 手！"
 
     except Exception as e:
-        return None, f"❌ 吸尘器异常: {str(e)}"
+        return None, f"❌ 扫描异常: {str(e)}"
     finally:
         if driver:
             driver.quit()
