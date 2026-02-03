@@ -479,7 +479,7 @@ with st.sidebar:
             if cid:
                 with st.spinner("正在探查棋谱状态..."):
                     # 调用新的终极版函数
-                    sgf_text, status_msg = fetch_txwq_ultimate(cid.strip())
+                    sgf_text, status_msg = fetch_txwq_with_browser(cid.strip())
                     
                     if sgf_text:
                         st.success(status_msg)
