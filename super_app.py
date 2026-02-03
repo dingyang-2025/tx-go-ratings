@@ -320,8 +320,8 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
 
 # --- 腾讯围棋抓取工具 ---
 def fetch_txwq_content(chessid: str):
-    """从腾讯接口获取 SGF 内容"""
-    url = "http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess"
+    # 尝试 H5 专用的获取接口（可能支持实时）
+    url = "http://h5.txwq.qq.com/cgi-bin/CommonMobileCGI/TXWQGetChess"
     data = {"chessid": chessid}
     try:
         resp = requests.post(url, data=data, timeout=10)
