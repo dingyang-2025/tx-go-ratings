@@ -319,83 +319,69 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (终极手机 APP 伪装版) ---
-import requests
+# --- 腾讯围棋抓取工具 (核武版：云端隐形浏览器) ---
 import datetime
+import json
+import time
 from urllib.parse import urlparse, parse_qs
+import streamlit as st
+
+# 导入 Selenium 相关库
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
 
 def num_to_sgf(n):
     return chr(ord('a') + n)
 
-def fetch_txwq_ultimate(input_str: str):
-    """
-    换道超车：放弃 H5 网页模拟，直接伪装成野狐手机 APP 调用底层 CGI 接口
-    """
+def fetch_txwq_with_browser(input_str: str):
     input_str = input_str.strip()
     chessid = input_str
     
-    # 提取所有隐藏的 APP 参数
     is_live_link = False
-    app_params = {}
+    full_share_url = input_str
     if "txwqshare" in input_str or "h5.txwq.qq.com" in input_str:
         is_live_link = True
         parsed = urlparse(input_str)
-        app_params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-        chessid = app_params.get("chessid", input_str)
+        params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        chessid = params.get("chessid", input_str)
 
-    # ====================================================
-    # 策略 A：历史棋谱 (APP 完结接口)
-    # ====================================================
-    try:
-        resp = requests.post("http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess", data={"chessid": chessid}, timeout=5)
-        js = resp.json()
-        if js.get("result") == 0:
-            return js.get("chess") or js.get("game_data"), "✅ 历史棋谱抓取成功！"
-    except: pass
-
-    # ====================================================
-    # 策略 B：直播棋谱 (伪装野狐手机 APP，直击底层接口)
-    # ====================================================
     if not is_live_link:
-        return None, "⚠️ 抓取直播需要输入包含 svrid, roomid 等参数的完整分享链接。"
+        return None, "⚠️ 抓取直播需要完整的分享链接。"
 
-    # 这里是核心：把 H5 链接里的参数，打包成手机 APP 的数据包格式
-    payload = {
-        "svrid": app_params.get("svrid", ""),
-        "svrtype": app_params.get("svrtype", ""),
-        "roomid": app_params.get("roomid", ""),
-        "createtime": app_params.get("createtime", ""),
-        "chessid": chessid,
-        "boardsize": "19"
-    }
+    # 配置隐形 Chrome
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")  # 隐形模式，不弹窗
+    chrome_options.add_argument("--no-sandbox") # 绕过 Linux 权限限制
+    chrome_options.add_argument("--disable-dev-shm-usage") # 防止内存溢出
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
+    driver = None
     try:
-        # 👑 突破点：不再请求 h5.txwq... 而是直接请求 happyapp... (APP 专用接口)
-        app_api_url = "http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQGetChess"
+        # 启动浏览器
+        driver = webdriver.Chrome(options=chrome_options)
         
-        # 伪装成手机 APP 的请求头 (极其简单，不查 Cookie)
-        headers = {
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 10;)",
-            "Content-Type": "application/x-www-form-urlencoded"
-        }
+        # 👑 动作1：浏览器访问分享页，自动执行 JS，生成指纹 Cookie
+        driver.get(full_share_url)
+        time.sleep(2) # 等待 JS 运行完毕，生成凭证
 
-        live_resp = requests.post(app_api_url, data=payload, headers=headers, timeout=10)
+        # 👑 动作2：浏览器直接访问数据 API
+        api_url = f"https://h5.txwq.qq.com/qqgameweiqi/wechat/urldataget?chessid={chessid}"
+        driver.get(api_url)
         
-        if live_resp.status_code == 400:
-            return None, "❌ 腾讯接口返回 400 错误：参数不匹配。请确认粘贴的是完整的分享链接。"
+        # 提取页面显示的 JSON 文本
+        json_text = driver.find_element(By.TAG_NAME, "body").text
+        if not json_text.strip():
+            return None, "❌ 浏览器渲染成功，但未截取到数据文本。"
 
-        live_data = live_resp.json()
-        
-        # 手机 APP 接口如果有错，会返回 result != 0
-        if live_data.get("result", -1) != 0:
-            return None, f"❌ 腾讯底层接口拒绝了请求：{live_data.get('resultstr', '未知错误')}"
-
+        live_data = json.loads(json_text)
         raw_moves = live_data.get("chess") or live_data.get("game_data")
+
         if not raw_moves:
             return None, "❌ 连接成功但无棋谱坐标，对局可能未开始。"
 
         # 组装 SGF
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_App_Live]DT[{datetime.date.today()}]"
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Selenium_Live]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         for move in raw_moves:
@@ -407,10 +393,13 @@ def fetch_txwq_ultimate(input_str: str):
                     move_count += 1
             except: continue
 
-        return sgf_header + sgf_moves + ")", f"✅ 直播抓取成功！当前进行至第 {move_count} 手。"
+        return sgf_header + sgf_moves + ")", f"✅ 核武级抓取成功！当前进行至第 {move_count} 手。"
 
     except Exception as e:
-        return None, f"❌ 抓取异常: {str(e)}"
+        return None, f"❌ 浏览器内核异常: {str(e)}"
+    finally:
+        if driver:
+            driver.quit() # 用完记得关浏览器，释放服务器内存
 
 # ===============================
 # 页面主逻辑
