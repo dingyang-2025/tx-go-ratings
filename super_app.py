@@ -319,7 +319,7 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (终极绝杀：网络嗅探版) ---
+# --- 腾讯围棋抓取工具 (终极禁术：网络钩子拦截版) ---
 import datetime
 import json
 import time
@@ -328,7 +328,6 @@ import streamlit as st
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
 
 def num_to_sgf(n):
     return chr(ord('a') + n)
@@ -355,52 +354,69 @@ def fetch_txwq_with_browser(input_str: str):
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    
-    # 👑 终极核心：开启 Chrome 的 F12 底层网络监听权限
-    chrome_options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
     driver = None
-    target_request_id = None
-    raw_json_text = None
-    
     try:
         driver = webdriver.Chrome(options=chrome_options)
         
-        st.toast("正在云端加载棋盘...")
-        driver.get(full_share_url)
-        time.sleep(5) # 等待 5 秒，确保棋盘完全画出
-
-        st.toast("棋盘加载完毕！正在从浏览器内存中拦截数据包...")
+        # 👑 终极禁术：在页面加载前，给浏览器的底层网络模块打上“思想钢印”
+        # 任何流经浏览器的 JSON 数据，只要包含 "chess" 或 "game_data"，统统没收！
+        intercept_js = """
+        window.__captured_txwq_data = null;
         
-        # 👑 终极技术：分析浏览器的性能日志，找出那个成功的接口
-        logs = driver.get_log("performance")
-        for entry in logs:
-            try:
-                message = json.loads(entry["message"])["message"]
-                # 寻找网络请求的响应记录
-                if message["method"] == "Network.responseReceived":
-                    url = message["params"]["response"]["url"]
-                    if "wechat/urldataget" in url and chessid in url:
-                        target_request_id = message["params"]["requestId"]
-                        break
-            except: continue
+        // 钩住 XMLHttpRequest
+        var origOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function() {
+            this.addEventListener('load', function() {
+                try {
+                    if (this.responseText.includes('chess') || this.responseText.includes('game_data')) {
+                        window.__captured_txwq_data = this.responseText;
+                    }
+                } catch(e) {}
+            });
+            origOpen.apply(this, arguments);
+        };
+        
+        // 钩住 Fetch API
+        var origFetch = window.fetch;
+        window.fetch = function() {
+            return origFetch.apply(this, arguments).then(function(response) {
+                response.clone().text().then(function(body) {
+                    if (body.includes('chess') || body.includes('game_data')) {
+                        window.__captured_txwq_data = body;
+                    }
+                });
+                return response;
+            });
+        };
+        """
+        # 将卧底代码植入新开的页面中
+        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': intercept_js})
 
-        # 👑 调用底层 CDP 协议，直接从浏览器缓存里“提货”
-        if target_request_id:
-            response_body = driver.execute_cdp_cmd("Network.getResponseBody", {"requestId": target_request_id})
-            raw_json_text = response_body["body"]
+        st.toast("网络钩子植入成功！正在监听数据流...")
+        driver.get(full_share_url)
 
+        # 👑 动态轮询：无需死等 5 秒，数据一到手立马撤退！
+        raw_json_text = None
+        for i in range(15):  # 最多等待 15 秒
+            time.sleep(1)
+            # 向浏览器里的卧底索要数据
+            raw_json_text = driver.execute_script("return window.__captured_txwq_data;")
+            if raw_json_text:
+                st.toast(f"🎉 第 {i+1} 秒捕获数据成功！")
+                break
+        
         if not raw_json_text:
-            return None, "❌ 嗅探失败：未在浏览器网络日志中找到该对局的数据包。"
+            return None, "❌ 监听失败：15秒内未捕获到任何棋谱数据包。可能对局刚创建尚未落子。"
 
         live_data = json.loads(raw_json_text)
         raw_moves = live_data.get("chess") or live_data.get("game_data")
 
         if not raw_moves:
-            return None, "❌ 数据包拦截成功，但内部无棋谱（可能对局刚创建）。"
+            return None, "❌ 成功拦截数据，但未发现棋子坐标。"
 
         # 组装 SGF
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Sniffer_Live]DT[{datetime.date.today()}]"
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Hook_Live]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         for move in raw_moves:
@@ -412,10 +428,10 @@ def fetch_txwq_with_browser(input_str: str):
                     move_count += 1
             except: continue
 
-        return sgf_header + sgf_moves + ")", f"✅ 极限反杀！成功拦截网络数据包。当前进行至第 {move_count} 手。"
+        return sgf_header + sgf_moves + ")", f"✅ 钩子拦截成功！当前进行至第 {move_count} 手。"
 
     except Exception as e:
-        return None, f"❌ 嗅探异常: {str(e)}"
+        return None, f"❌ 钩子运行异常: {str(e)}"
     finally:
         if driver:
             driver.quit()
