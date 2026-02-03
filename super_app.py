@@ -319,7 +319,7 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (核武版：云端隐形浏览器) ---
+# --- 腾讯围棋抓取工具 (核武版 + 拍照取证) ---
 import datetime
 import json
 import time
@@ -351,28 +351,41 @@ def fetch_txwq_with_browser(input_str: str):
 
     # 配置隐形 Chrome
     chrome_options = Options()
-    chrome_options.add_argument("--headless")  # 隐形模式，不弹窗
-    chrome_options.add_argument("--no-sandbox") # 绕过 Linux 权限限制
-    chrome_options.add_argument("--disable-dev-shm-usage") # 防止内存溢出
+    chrome_options.add_argument("--headless=new")  # 使用新版无头模式，更不容易被检测
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1920,1080") # 设置窗口大小，防止元素挤压
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     driver = None
     try:
-        # 启动浏览器
         driver = webdriver.Chrome(options=chrome_options)
         
-        # 👑 动作1：浏览器访问分享页，自动执行 JS，生成指纹 Cookie
+        # 👑 动作1：访问分享页，静静等待 JS 生成指纹 (加长等待时间至 4 秒)
+        st.toast("正在云端浏览器中打开分享页...")
         driver.get(full_share_url)
-        time.sleep(2) # 等待 JS 运行完毕，生成凭证
+        time.sleep(4) 
 
-        # 👑 动作2：浏览器直接访问数据 API
+        # 👑 动作2：直接访问数据 API
+        st.toast("正在请求直播数据接口...")
         api_url = f"https://h5.txwq.qq.com/qqgameweiqi/wechat/urldataget?chessid={chessid}"
         driver.get(api_url)
         
-        # 提取页面显示的 JSON 文本
-        json_text = driver.find_element(By.TAG_NAME, "body").text
+        # 👑 关键：再等 2 秒，确保 JSON 数据完全渲染到页面上
+        time.sleep(2)
+        
+        # 提取页面内容。Chrome 显示 JSON 时通常会包在一个 <pre> 标签里
+        try:
+            json_text = driver.find_element(By.TAG_NAME, "pre").text
+        except:
+            json_text = driver.find_element(By.TAG_NAME, "body").text
+
         if not json_text.strip():
-            return None, "❌ 浏览器渲染成功，但未截取到数据文本。"
+            # 🔴 抓取失败：立刻拍照取证并展示在网页上！
+            screenshot = driver.get_screenshot_as_png()
+            st.error("❌ 未截取到文本！这是云端浏览器当前的画面：")
+            st.image(screenshot, caption="云端浏览器实时截图")
+            return None, "请查看上方截图，看看腾讯是不是弹出了验证码或错误页。"
 
         live_data = json.loads(json_text)
         raw_moves = live_data.get("chess") or live_data.get("game_data")
@@ -396,11 +409,10 @@ def fetch_txwq_with_browser(input_str: str):
         return sgf_header + sgf_moves + ")", f"✅ 核武级抓取成功！当前进行至第 {move_count} 手。"
 
     except Exception as e:
-        return None, f"❌ 浏览器内核异常: {str(e)}"
+        return None, f"❌ 浏览器异常: {str(e)}"
     finally:
         if driver:
-            driver.quit() # 用完记得关浏览器，释放服务器内存
-
+            driver.quit()
 # ===============================
 # 页面主逻辑
 # ===============================
