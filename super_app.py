@@ -320,43 +320,49 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
     return results
 
 # --- 腾讯围棋抓取工具 ---
-def fetch_txwq_content_v2(input_str: str):
+def fetch_txwq_content_pro(input_str: str):
     """
-    智能抓取：支持直接输入 ID 或 H5 分享链接
+    全能抓取器：兼容历史 ID 和直播链接
     """
-    # 默认值
+    input_str = input_str.strip()
+    
+    # 默认：抓取历史棋谱的接口
     api_url = "http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess"
-    data = {"chessid": input_str.strip()}
+    payload = {"chessid": input_str}
 
-    # 如果输入的是 H5 链接，提取所有直播参数
-    if "txwqshare" in input_str:
-        parsed = urlparse(input_str)
-        params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-        # 直播专用接口和参数
-        api_url = "http://h5.txwq.qq.com/cgi-bin/CommonMobileCGI/TXWQGetChess"
-        data = {
-            "svrid": params.get("svrid"),
-            "svrtype": params.get("svrtype"),
-            "roomid": params.get("roomid"),
-            "createtime": params.get("createtime"),
-            "chessid": params.get("chessid"),
-            "boardsize": "19"
-        }
+    # 如果输入的是 H5 直播链接，提取隐藏参数
+    if "txwqshare" in input_str or "h5.txwq.qq.com" in input_str:
+        try:
+            parsed = urlparse(input_str)
+            params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+            
+            # 切换为直播接口
+            api_url = "http://h5.txwq.qq.com/cgi-bin/CommonMobileCGI/TXWQGetChess"
+            payload = {
+                "svrid": params.get("svrid"),
+                "svrtype": params.get("svrtype"),
+                "roomid": params.get("roomid"),
+                "createtime": params.get("createtime"),
+                "chessid": params.get("chessid"),
+                "boardsize": "19"
+            }
+        except Exception as e:
+            st.error(f"链接解析失败: {e}")
+            return None
 
     try:
-        # 发送请求
-        resp = requests.post(api_url, data=data, timeout=10)
+        resp = requests.post(api_url, data=payload, timeout=10)
         resp.raise_for_status()
         js = resp.json()
         
         if js.get("result") == 0:
-            # 注意：直播返回的字段名可能叫 'chess' 或 'game_data'
+            # 兼容不同接口返回的字段名
             return js.get("chess") or js.get("game_data")
         else:
-            st.error(f"腾讯 API 返回错误: {js.get('resultstr')}")
+            st.error(f"腾讯 API 报错: {js.get('resultstr')}")
             return None
     except Exception as e:
-        st.error(f"抓取失败: {e}")
+        st.error(f"网络连接失败: {e}")
         return None
 
 # ===============================
@@ -426,28 +432,28 @@ with st.sidebar:
                 st.success(f"已保存：{p1} vs {p2}（胜者：{final_winner}）")
                 st.rerun()
     
-    st.divider()  # 加一条分割线
-    
-    # 新增：腾讯围棋抓取小工具
+    st.divider()
     st.header("🛠 实用工具")
     with st.expander("📥 腾讯围棋棋谱抓取"):
-        st.caption("输入对局 ID 即可提取 SGF 文件")
-        cid = st.text_input("Chess ID", placeholder="如: 1770092663030101341")
-        if st.button("获取并准备下载"):
+        st.caption("支持输入 棋谱ID 或 直播分享链接")
+        cid = st.text_input("输入内容", placeholder="ID 或 H5 链接", key="txwq_input")
+        
+        if st.button("开始抓取"):
             if cid:
-                with st.spinner("抓取中..."):
-                    sgf_text = fetch_txwq_content(cid.strip())
-                    if sgf_text:
-                        st.success("抓取成功！")
-                        # 提供下载按钮
+                with st.spinner("正在努力搬运棋谱..."):
+                    # 👈 注意这里函数名要和上面定义的一致
+                    sgf_data = fetch_txwq_content_pro(cid) 
+                    
+                    if sgf_data:
+                        st.success("拿到了！")
                         st.download_button(
-                            label="💾 点击下载 SGF",
-                            data=sgf_text,
-                            file_name=f"TXWQ_{cid}.sgf",
+                            label="💾 下载 SGF 文件",
+                            data=str(sgf_data),
+                            file_name=f"TXWQ_Export.sgf",
                             mime="text/plain"
                         )
             else:
-                st.warning("请输入有效 ID")
+                st.warning("总得填点什么吧？")
 
 # ========== 实时排行 & 多人 Elo 走势 ==========
 col_rank, col_trend = st.columns([1, 2])
