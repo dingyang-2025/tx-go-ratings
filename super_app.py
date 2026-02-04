@@ -330,162 +330,145 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (返璞归真版：网络日志精准捕获) ---
+# --- 腾讯围棋抓取工具 (返璞归真：精准拦截 Console) ---
 def fetch_txwq_websocket(input_str: str):
     """
-    极简思路：
-    不再注入任何 JS，不再劫持控制台。
-    直接在浏览器的 Network 日志中寻找包含 "opList" (历史) 或 "checkSyn" (直播) 的数据包。
+    回归最简单的逻辑：
+    用户在 Console 里看到了数据，我们就去 Console 里拿。
+    精准定位 console.warn 中的 roomDetail -> opList 结构。
     """
     input_str = input_str.strip()
-    # 简单的链接清洗
-    if "txwqshare" in input_str or "h5.txwq.qq.com" in input_str:
-        pass
-    else:
+    if "txwqshare" not in input_str and "h5.txwq.qq.com" not in input_str:
         return None, "⚠️ 请输入完整的直播分享链接。"
 
-    # 1. 配置浏览器：只需要开启 Performance (网络) 日志
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
-    # 关键：开启性能日志，这能让我们看到 WebSocket 的原始内容
-    chrome_options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     driver = None
     try:
         driver = webdriver.Chrome(options=chrome_options)
+
+        # 👑 注入精准拦截脚本
+        # 我们不乱抓了，只抓你截图里的那种结构
+        hijack_script = """
+        window.__collected_moves = [];
+        var originalWarn = console.warn;
+        var originalLog = console.log;
         
-        st.toast("正在连接直播间，静默接收数据...")
+        function extractFromOpList(list) {
+            if (!Array.isArray(list)) return;
+            list.forEach(op => {
+                // 截图显示：opType 203 的数据在 data 字段里
+                if (op.data && 'x' in op.data && 'y' in op.data) {
+                    window.__collected_moves.push(op.data);
+                }
+                // 截图显示：opType 600/603 可能包含 setPieceList (摆子)
+                else if (op.setPieceList && Array.isArray(op.setPieceList)) {
+                     op.setPieceList.forEach(p => window.__collected_moves.push(p));
+                }
+                // 截图显示：有些直接就是棋子
+                else if ('x' in op && 'y' in op) {
+                    window.__collected_moves.push(op);
+                }
+            });
+        }
+
+        function scanArg(arg) {
+            if (!arg || typeof arg !== 'object') return;
+            
+            // 🎯 核心路径：对应你的截图 image_1a3c08.jpg
+            // 结构是 { result: 0, roomDetail: { opList: [...] } }
+            if (arg.roomDetail && arg.roomDetail.opList) {
+                extractFromOpList(arg.roomDetail.opList);
+            }
+            // 备用路径：万一它有时候不包在 roomDetail 里
+            else if (arg.opList) {
+                extractFromOpList(arg.opList);
+            }
+            // 备用路径：直播增量数据 (单颗棋子)
+            else if ('x' in arg && 'y' in arg && 'color' in arg) {
+                window.__collected_moves.push(arg);
+            }
+        }
+
+        function hijack(args) {
+            for (var i = 0; i < args.length; i++) {
+                scanArg(args[i]);
+            }
+        }
+
+        // 重点监听 warn (历史大包在这里)，同时也监听 log
+        console.warn = function() { hijack(arguments); originalWarn.apply(console, arguments); };
+        console.log = function() { hijack(arguments); originalLog.apply(console, arguments); };
+        """
+        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': hijack_script})
+
+        st.toast("正在打开页面并等待历史数据加载...")
         driver.get(input_str)
         
-        # 等待 10 秒，足够历史数据包（那个 opList）传输完毕
-        time.sleep(10)
-
-        # 2. 捞取日志
-        logs = driver.get_log("performance")
-        found_moves = []
+        collected_data = []
         
-        st.toast(f"正在分析 {len(logs)} 条网络通讯日志...")
+        # 轮询 12 秒
+        # 只要那个黄色的警告在控制台一打印，我们瞬间就能拿到数据
+        for i in range(12): 
+            time.sleep(1)
+            collected_data = driver.execute_script("return window.__collected_moves;")
+            
+            # 如果抓到了 >20 手，说明历史包 opList 解析成功
+            if collected_data and len(collected_data) > 20:
+                time.sleep(1) 
+                break
+        
+        if not collected_data:
+             return None, "❌ 未捕获数据。页面可能加载失败，或未触发 Console 打印。"
 
-        for entry in logs:
-            try:
-                # 提取日志内容
-                message = json.loads(entry["message"])["message"]
-                
-                # 我们只关心 WebSocket 收到的帧
-                if message["method"] == "Network.webSocketFrameReceived":
-                    # 获取原始数据字符串
-                    payload = message["params"]["response"]["payloadData"]
-                    
-                    # --- 核心逻辑：只找关键字 ---
-                    
-                    # 🎯 情况 A: 找到了历史记录大包 (特征：包含 "opList")
-                    if "opList" in payload:
-                        # 这是一个巨大的 JSON，里面包含了所有历史步骤
-                        # 我们不用复杂的解析，直接用正则或者递归找里面的 x, y, color
-                        # 简单的做法：先尝试转成 JSON 对象
-                        try:
-                            # 有时候外层会有一些 socket.io 的前缀（数字），尝试跳过
-                            json_str = payload
-                            if not json_str.startswith("{") and "{" in json_str:
-                                json_str = json_str[json_str.find("{"):]
-                                
-                            data = json.loads(json_str)
-                            
-                            # 深度递归寻找 opList 里的数据
-                            def extract_from_oplist(obj):
-                                if isinstance(obj, dict):
-                                    if "opList" in obj and isinstance(obj["opList"], list):
-                                        for op in obj["opList"]:
-                                            # 根据你的截图，opType 203 包含棋子数据
-                                            if op.get("opType") == 203 and "data" in op:
-                                                found_moves.append(op["data"])
-                                            # 也有可能数据直接在 op 里
-                                            elif "x" in op and "y" in op:
-                                                found_moves.append(op)
-                                    else:
-                                        for k, v in obj.items():
-                                            extract_from_oplist(v)
-                                elif isinstance(obj, list):
-                                    for item in obj:
-                                        extract_from_oplist(item)
-                            
-                            extract_from_oplist(data)
-                        except: pass
-
-                    # 🎯 情况 B: 找到了直播更新小包 (特征：包含 "checkSyn" 或 "gameCountdownNotify")
-                    elif "checkSyn" in payload or "x" in payload:
-                         try:
-                            json_str = payload
-                            if not json_str.startswith("{") and "{" in json_str:
-                                json_str = json_str[json_str.find("{"):]
-                            
-                            data = json.loads(json_str)
-                            
-                            # 简单的递归找 x, y
-                            def extract_single_move(obj):
-                                if isinstance(obj, dict):
-                                    if "x" in obj and "y" in obj and "color" in obj:
-                                        found_moves.append(obj)
-                                    for v in obj.values():
-                                        extract_single_move(v)
-                            
-                            extract_single_move(data)
-                         except: pass
-
-            except: continue
-
-        # 3. 数据清洗与组装
-        if not found_moves:
-             return None, "❌ 未能在网络日志中发现 'opList' 或棋谱数据。请确认链接有效。"
-
-        # 去重 (以 x,y,color 为指纹)
+        # === 🧩 数据清洗与组装 ===
         unique_moves = []
         seen = set()
         
-        # 排序：如果有 checkSyn (序号)，优先按序号排；如果没有，按捕获顺序排
-        # 通常 opList 里的数据自带顺序，我们尽量保留
+        # 截图里有 "step" 或 "checkSyn" 字段，可以用它排序
+        # 但通常 opList 本身就是有序的数组，我们直接按捕获顺序处理最稳妥
         
-        # 分离出带序号的，辅助排序
-        moves_with_seq = [m for m in found_moves if "checkSyn" in m or "step" in m]
-        if len(moves_with_seq) > 5:
-            # 如果大部分数据都有序号，那就按序号排
-            moves_with_seq.sort(key=lambda m: m.get("checkSyn", m.get("step", 0)))
-            # 重新合并：这里简化处理，直接信任排序后的结果
-            processed_list = moves_with_seq
-        else:
-            # 否则信任日志的自然顺序
-            processed_list = found_moves
-
-        for m in processed_list:
+        for m in collected_data:
             try:
-                x, y, c = int(m['x']), int(m['y']), int(m['color'])
-                if f"{x},{y},{c}" not in seen:
-                    seen.add(f"{x},{y},{c}")
+                x = int(m['x'])
+                y = int(m['y'])
+                color_val = int(m['color'])
+                
+                # 指纹去重
+                fingerprint = f"{x},{y},{color_val}"
+                if fingerprint not in seen:
+                    seen.add(fingerprint)
                     unique_moves.append(m)
             except: continue
 
+        # 如果有 step 字段，尝试排序一下更保险
+        if len(unique_moves) > 0 and 'step' in unique_moves[0]:
+             unique_moves.sort(key=lambda x: x.get('step', 0))
+
         # 生成 SGF
-        sgf = f"(;GM[1]SZ[19]AP[Txwq_Simple_Log]DT[{datetime.date.today()}]"
+        sgf = f"(;GM[1]SZ[19]AP[Txwq_Simple_Console]DT[{datetime.date.today()}]"
         count = 0
         for m in unique_moves:
-            # 颜色转换：截图显示 1=黑, 2=白
-            color = "B"
-            if m['color'] == 2: color = "W"
-            elif m['color'] == 1: color = "B"
+            # 颜色逻辑：截图 opType 203 data 里的 color:1 是黑，color:2 是白
+            c = "B"
+            if m['color'] == 2: c = "W"
+            elif m['color'] == 1: c = "B"
+            elif m['color'] == 0: c = "B" # 兼容旧版
             
-            # 坐标转换
             if 0 <= m['x'] <= 18 and 0 <= m['y'] <= 18:
-                sgf += f";{color}[{num_to_sgf(m['x'])}{num_to_sgf(m['y'])}]"
+                sgf += f";{c}[{num_to_sgf(m['x'])}{num_to_sgf(m['y'])}]"
                 count += 1
                 
-        return sgf + ")", f"✅ 抓取成功！从底层网络流中提取了 {count} 手棋。"
+        return sgf + ")", f"✅ 抓取成功！精准提取历史记录共 {count} 手。"
 
     except Exception as e:
-        return None, f"❌ 发生错误: {str(e)}"
+        return None, f"❌ 运行异常: {str(e)}"
     finally:
         if driver: driver.quit()
             
