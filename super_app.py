@@ -332,19 +332,19 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (反爬增强 + 截图诊断版) ---
+# --- 腾讯围棋抓取工具 (Vue 内存直接提取版) ---
 def fetch_txwq_websocket(input_str: str):
     """
-    诊断版思路：
-    1. 强力反爬配置 (移除自动化标记)。
-    2. 手机模式伪装。
-    3. 如果抓不到数据，直接截图网页内容，让用户看到浏览器到底卡在哪。
+    必杀技思路：
+    既然截图能显示棋盘，说明数据一定在 JS 内存里。
+    直接遍历网页的 Vue 实例，寻找包含棋子坐标的数组。
+    不再依赖 console 日志或网络抓包。
     """
     input_str = input_str.strip()
     if "txwqshare" not in input_str and "h5.txwq.qq.com" not in input_str:
         return None, "⚠️ 请输入完整的直播分享链接。"
 
-    # 1. 强力反爬配置
+    # 1. 强力反爬配置 (保持不变，因为证明有效)
     mobile_emulation = {
         "deviceMetrics": { "width": 375, "height": 812, "pixelRatio": 3.0 },
         "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1"
@@ -355,7 +355,7 @@ def fetch_txwq_websocket(input_str: str):
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled") # 👈 关键：隐藏自动化特征
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("mobileEmulation", mobile_emulation)
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
@@ -364,101 +364,134 @@ def fetch_txwq_websocket(input_str: str):
     try:
         driver = webdriver.Chrome(options=chrome_options)
         
-        # 再次执行 CDP 命令来隐藏 webdriver 属性
+        # 隐藏 webdriver 特征
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": """
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-            """
+            "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         })
 
-        # 2. 注入“暴力录音”脚本 (不筛选，全录)
-        hijack_script = """
-        window.__log_dump = [];
-        function record(args) {
-            try {
-                var entry = [];
-                for (var i = 0; i < args.length; i++) {
-                    // 尝试转 JSON，转不了就强转 String
-                    try { entry.push(JSON.stringify(args[i])); } 
-                    catch(e) { entry.push(String(args[i])); }
-                }
-                window.__log_dump.push(entry.join(" "));
-            } catch (e) {}
-        }
-        console.warn = function() { record(arguments); };
-        console.log = function() { record(arguments); };
-        """
-        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': hijack_script})
-
-        st.toast("正在潜入... (已启用强力反爬)")
+        st.toast("正在加载棋盘内存...")
         driver.get(input_str)
         
-        # 等待数据加载
-        time.sleep(10)
+        # 2. 等待棋盘渲染 (截图显示棋盘已经出来了)
+        time.sleep(8)
         
-        # 3. 提取数据
-        logs = driver.execute_script("return window.__log_dump;")
-        
-        # === 4. 暴力正则匹配 ===
-        found_moves = []
-        if logs:
-            full_text = " ".join(logs)
-            # 你的截图显示： "x":16, "y":3, "color":1
-            # 我们用正则直接在文本里搜
-            pattern = re.compile(r'"x":(\d+)\s*,\s*"y":(\d+)\s*,\s*"color":(\d+)', re.IGNORECASE)
-            matches = pattern.findall(full_text)
-            
-            # 尝试另一种顺序 (color在前)
-            pattern2 = re.compile(r'"color":(\d+)\s*,\s*"x":(\d+)\s*,\s*"y":(\d+)', re.IGNORECASE)
-            matches2 = pattern2.findall(full_text)
-            
-            for m in matches: found_moves.append({'x': int(m[0]), 'y': int(m[1]), 'c': int(m[2])})
-            for m in matches2: found_moves.append({'x': int(m[1]), 'y': int(m[2]), 'c': int(m[0])})
+        # 3. 👑 注入“探囊取物”脚本：直接搜刮 Vue 实例
+        # 这段 JS 会遍历页面上的所有 Vue 组件，找到那个存着棋谱的数组
+        extraction_script = """
+        function findChessData() {
+            // 辅助：判断一个对象像不像棋子
+            function isMove(obj) {
+                return obj && typeof obj === 'object' &&
+                       'x' in obj && typeof obj.x === 'number' &&
+                       'y' in obj && typeof obj.y === 'number' &&
+                       'color' in obj;
+            }
 
-        # === 5. 失败时的诊断 (关键！) ===
-        if not found_moves:
-            # 📸 截图看看到底发生了什么
+            // 辅助：判断一个数组像不像棋谱
+            function isMoveList(arr) {
+                if (!Array.isArray(arr) || arr.length < 5) return false;
+                var validCount = 0;
+                // 抽查前10个
+                for (var i = 0; i < Math.min(arr.length, 10); i++) {
+                    if (isMove(arr[i]) || (arr[i] && isMove(arr[i].data))) validCount++;
+                }
+                return validCount >= 3;
+            }
+
+            // 1. 深度优先搜索 Vue 树
+            var queue = [];
+            
+            // 找到根节点
+            var root = document.getElementById('app') || document.body;
+            
+            // 尝试获取根 Vue 实例
+            if (root.__vue__) queue.push(root.__vue__);
+            else {
+                // 暴力遍历所有 DOM 找 Vue 实例
+                var all = document.querySelectorAll('*');
+                for (var i = 0; i < all.length; i++) {
+                    if (all[i].__vue__) queue.push(all[i].__vue__);
+                }
+            }
+
+            var visited = new Set();
+            var candidates = [];
+
+            while (queue.length > 0) {
+                var vm = queue.shift();
+                if (visited.has(vm)) continue;
+                visited.add(vm);
+
+                // 搜查 data
+                try {
+                    if (vm.$data) {
+                        for (var key in vm.$data) {
+                            var val = vm.$data[key];
+                            // 检查是不是棋谱数组
+                            if (isMoveList(val)) return val; 
+                            // 检查是不是包含 opList 的大对象
+                            if (val && val.opList && isMoveList(val.opList)) return val.opList;
+                            if (val && val.roomDetail && val.roomDetail.opList) return val.roomDetail.opList;
+                        }
+                    }
+                } catch(e) {}
+
+                // 继续搜子组件
+                if (vm.$children) {
+                    vm.$children.forEach(child => queue.push(child));
+                }
+            }
+            return null;
+        }
+        return findChessData();
+        """
+        
+        memory_data = driver.execute_script(extraction_script)
+        
+        if not memory_data:
+            # 再次尝试截图诊断，看看是不是变了
             screenshot = driver.get_screenshot_as_base64()
-            page_title = driver.title
-            page_source_preview = driver.page_source[:500] # 看前500个字符
-            
-            debug_info = f"""
-            ❌ **抓取失败诊断报告**
-            
-            1. **页面标题**: {page_title}
-            2. **捕获日志数**: {len(logs) if logs else 0} 条
-            3. **页面截图**: (见下方)
-            
-            **可能原因分析**:
-            * 如果截图是**白屏**: 网络超时或加载失败。
-            * 如果截图是**下载页/App推荐**: 手机模拟未生效，被重定向了。
-            * 如果截图是**棋盘**但没数据: 数据在内存里，但 Console 没打印 (我们需要换 Vue 内存提取法)。
-            """
-            return None, (debug_info, screenshot)
+            return None, (f"❌ 内存提取失败。虽然棋盘已渲染，但未找到符合特征的数据结构。\n可能是腾讯使用了非 Vue 框架 (React?) 或变量名混淆。", screenshot)
 
-        # 6. 成功时的组装
+        st.toast(f"🎉 内存提取成功！获取到 {len(memory_data)} 条原始数据。")
+
+        # 4. 数据清洗
         unique_moves = []
         seen = set()
-        for m in found_moves:
-            fingerprint = f"{m['x']},{m['y']},{m['c']}"
-            if fingerprint not in seen:
-                seen.add(fingerprint)
-                unique_moves.append(m)
+        
+        # 内存里的数据通常已经是 Object 了，不需要正则，直接读
+        for item in memory_data:
+            m = None
+            # 情况A: item 就是棋子 {x:1, y:2, color:1}
+            if 'x' in item and 'y' in item and 'color' in item:
+                m = item
+            # 情况B: item 是操作对象 {opType:203, data: {x:1...}}
+            elif 'data' in item and 'x' in item['data']:
+                m = item['data']
+            
+            if m:
+                try:
+                    x, y, c = int(m['x']), int(m['y']), int(m['color'])
+                    fingerprint = f"{x},{y},{c}"
+                    if fingerprint not in seen:
+                        seen.add(fingerprint)
+                        unique_moves.append({'x': x, 'y': y, 'c': c})
+                except: continue
 
-        sgf = f"(;GM[1]SZ[19]AP[Txwq_AntiBot]DT[{datetime.date.today()}]"
+        # 5. 生成 SGF
+        sgf = f"(;GM[1]SZ[19]AP[Txwq_Vue_Heist]DT[{datetime.date.today()}]"
         count = 0
         for m in unique_moves:
             color = "B"
             if m['c'] == 2: color = "W"
             elif m['c'] == 1: color = "B"
             elif m['c'] == 0: color = "B"
+            
             if 0 <= m['x'] <= 18 and 0 <= m['y'] <= 18:
                 sgf += f";{color}[{num_to_sgf(m['x'])}{num_to_sgf(m['y'])}]"
                 count += 1
                 
-        return sgf + ")", f"✅ 成功！提取了 {count} 手棋。"
+        return sgf + ")", f"✅ 成功！从页面内存中直接提取了 {count} 手棋。"
 
     except Exception as e:
         return None, f"❌ 系统错误: {str(e)}"
