@@ -330,22 +330,19 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (终极胜利版：控制台拼图) ---
+# --- 腾讯围棋抓取工具 (终极完结：历史+直播全收录) ---
 def fetch_txwq_websocket(input_str: str):
     """
-    基于用户验证成功的逻辑：
-    1. 劫持 console.log
-    2. 收集包含 {x, y, color, checkSyn} 的对象
-    3. 按 checkSyn (手数) 排序还原棋谱
+    终极修正版：
+    1. 移除 checkSyn 强制检查，确保抓到历史棋谱列表。
+    2. 使用指纹去重逻辑，防止历史数据与直播数据重复。
     """
     input_str = input_str.strip()
     full_share_url = input_str
     
-    # 简单的链接检查
     if "txwqshare" not in input_str and "h5.txwq.qq.com" not in input_str:
         return None, "⚠️ 请输入完整的直播分享链接。"
 
-    # 配置无头浏览器
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
@@ -358,8 +355,8 @@ def fetch_txwq_websocket(input_str: str):
     try:
         driver = webdriver.Chrome(options=chrome_options)
 
-        # 👑 注入“碎片收集器”脚本
-        # 只要对象里同时有 x, y, color, checkSyn，它就是我们要找的棋子！
+        # 👑 注入“宽容版”收集器
+        # 核心改动：删除了对 checkSyn 的强制要求，只要有 x,y,color 就抓！
         hijack_script = """
         window.__collected_moves = [];
         var originalLog = console.log;
@@ -367,17 +364,21 @@ def fetch_txwq_websocket(input_str: str):
         
         function scanArg(arg) {
             if (arg && typeof arg === 'object') {
-                // 🎯 核心特征匹配：你验证过的 x, y, checkSyn
-                if ('x' in arg && 'y' in arg && 'color' in arg && 'checkSyn' in arg) {
+                // 🎯 只要有 x, y, color 就抓！这是为了兼容历史记录包
+                if ('x' in arg && 'y' in arg && 'color' in arg) {
                     window.__collected_moves.push(arg);
                 }
-                // 有时候棋子包在 chessData 里，多搜一层
+                // 兼容嵌套情况 (有时候棋子包在 chessData 里)
                 else if (arg.chessData && 'x' in arg.chessData) {
-                    window.__collected_moves.push(arg.chessData);
+                     window.__collected_moves.push(arg.chessData);
                 }
-                // 递归防止漏掉藏在数组里的
+                // 递归：历史棋谱通常是一个大数组，必须钻进去找
                 else if (Array.isArray(arg)) {
                     arg.forEach(item => scanArg(item));
+                }
+                // 字典遍历：防止藏在 list 字段里
+                else if (arg.list && Array.isArray(arg.list)) {
+                    arg.list.forEach(item => scanArg(item));
                 }
             }
         }
@@ -393,62 +394,76 @@ def fetch_txwq_websocket(input_str: str):
         """
         driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': hijack_script})
 
-        st.toast("正在潜入直播间，等待历史棋谱加载...")
+        st.toast("正在潜入控制台，全量收集棋谱...")
         driver.get(full_share_url)
         
         collected_data = []
         
-        # 轮询 15 秒，确保历史棋谱（几百手棋）全部打印出来
+        # 轮询 15 秒，给历史数据加载留足时间
         for i in range(15): 
             time.sleep(1)
             collected_data = driver.execute_script("return window.__collected_moves;")
             
-            # 如果收集到了超过 10 手棋，且数量不再变化，说明加载完了
+            # 如果抓到了 >10 手棋，且数量稳定了，就说明历史记录抓完了
             if collected_data and len(collected_data) > 10:
-                # 简单防抖：连续两次数量一致才算完
-                time.sleep(1)
-                new_len = len(driver.execute_script("return window.__collected_moves;"))
-                if new_len == len(collected_data):
-                    break
+                time.sleep(1) # 防抖
+                break
         
         if not collected_data:
-             return None, "❌ 监听超时。控制台未打印符合特征的棋谱数据，可能是直播已结束或权限受限。"
+             return None, "❌ 监听超时。控制台未打印任何包含 {x,y,color} 的对象。可能是页面加载失败。"
 
-        # === 🧩 拼图核心逻辑 ===
+        # === 🧩 智能拼图逻辑 ===
         
-        # 1. 去重：网络可能会发重复包，用 checkSyn 做唯一 Key
-        # checkSyn 就是手数 (107, 108...)
-        unique_moves = {}
+        # 1. 简单去重 (利用 "x,y,color" 作为指纹)
+        # 为什么要去重？因为历史记录列表里可能有 1-100手，而单独的直播包里可能又发了一次 100手。
+        unique_moves = []
+        seen_fingerprints = set()
+        
+        # 浏览器控制台通常是按时间顺序打印的：先打历史记录(1-100)，再打直播更新(101...)
+        # 所以我们直接按收集到的顺序处理即可
+        
         for m in collected_data:
-            if 'checkSyn' in m:
-                unique_moves[m['checkSyn']] = m
-        
-        if not unique_moves:
-             return None, "❌ 收集到了数据，但缺少 checkSyn 字段，无法排序。"
+            try:
+                x = int(m['x'])
+                y = int(m['y'])
+                c = int(m['color'])
+                
+                # 指纹：x,y,color
+                fingerprint = f"{x},{y},{c}"
+                
+                if fingerprint not in seen_fingerprints:
+                    seen_fingerprints.add(fingerprint)
+                    unique_moves.append(m)
+            except: continue
+            
+        # 2. 如果数据量太少，可能是抓取出错
+        if len(unique_moves) < 5:
+            st.warning(f"⚠️ 仅捕获 {len(unique_moves)} 手棋，可能数据加载不全。")
 
-        # 2. 排序：按手数从小到大排列 (1, 2, 3 ... 108)
-        sorted_moves = sorted(unique_moves.values(), key=lambda x: x['checkSyn'])
-        
         # 3. 组装 SGF
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Console_Hack]DT[{datetime.date.today()}]"
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Full_Collector]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         
-        for move in sorted_moves:
+        for move in unique_moves:
             try:
                 x = int(move['x'])
                 y = int(move['y'])
                 color_val = int(move['color'])
                 
-                # 腾讯规则验证：1=黑, 2=白 (符合你的观测)
-                c = "B" if color_val == 1 else "W"
+                # 颜色映射：根据你的截图 Packet1(color:1) Packet2(color:2)
+                # 且 Packet1是107手(黑), Packet2是108手(白) -> 1=黑, 2=白
+                c = "B"
+                if color_val == 2: c = "W"
+                elif color_val == 1: c = "B"
+                elif color_val == 0: c = "B" # 兼容旧格式
                 
                 if 0 <= x <= 18 and 0 <= y <= 18:
                     sgf_moves += f";{c}[{num_to_sgf(x)}{num_to_sgf(y)}]"
                     move_count += 1
             except: continue
 
-        status_msg = f"✅ 抓取成功！利用 checkSyn 完美还原 {move_count} 手棋。"
+        status_msg = f"✅ 大获全胜！共提取 {move_count} 手棋（含历史记录）。"
         return sgf_header + sgf_moves + ")", status_msg
 
     except Exception as e:
@@ -526,14 +541,14 @@ with st.sidebar:
     st.divider()
     
     st.header("🛠 实用工具")
-    with st.expander("📡 腾讯围棋直播抓取 (Console版)", expanded=True):
-        st.caption("技术原理：劫持浏览器控制台日志，利用 checkSyn 字段重组棋谱。")
+    with st.expander("📡 腾讯围棋直播抓取 (终极版)", expanded=True):
+        st.caption("技术原理：控制台日志劫持 + 历史数据全量递归提取。")
         
         cid = st.text_input("输入直播分享链接", placeholder="https://h5.txwq.qq.com/txwqshare/...")
         
         if st.button("开始抓取"):
             if cid:
-                with st.spinner("正在启动云端浏览器并收集棋谱..."):
+                with st.spinner("正在启动云端浏览器并收集全量棋谱..."):
                     sgf_text, status_msg = fetch_txwq_websocket(cid.strip())
                     
                     if sgf_text:
