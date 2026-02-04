@@ -3,8 +3,10 @@ import json
 import time
 import datetime
 import requests
-import pandas as pd  # 👈 补全了，修复 NameError
-import altair as alt # 👈 补全了
+import base64  # 👈 新增：用于撕开乱码包装
+import zlib    # 👈 新增：用于解压数据
+import pandas as pd  # 👈 补全了！修复 NameError
+import altair as alt 
 import streamlit as st
 from urllib.parse import urlparse, parse_qs
 
@@ -330,51 +332,37 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (终极透视诊断版) ---
+# --- 腾讯围棋抓取工具 (Base64 解码透视版) ---
 def find_moves_recursively(obj):
-    """
-    深度递归搜索：不看字段名，只找“长得很像棋谱”的数据结构
-    目标特征：列表长度>10，且第一个元素也是列表 [x, y, z, ...]
-    """
+    """递归搜索棋谱坐标"""
     if isinstance(obj, list):
-        # 检查当前列表是否就是棋谱
         if len(obj) > 10 and isinstance(obj[0], list) and len(obj[0]) >= 4:
-            # 进一步验证内部是否为数字，防止误判
             try:
-                if isinstance(obj[0][2], (int, float)):
-                    return obj
+                if isinstance(obj[0][2], (int, float)): return obj
             except: pass
-        
-        # 如果不是，继续遍历列表里的每个元素
         for item in obj:
             res = find_moves_recursively(item)
             if res: return res
-            
     elif isinstance(obj, dict):
-        # 遍历字典的所有 value
         for value in obj.values():
             res = find_moves_recursively(value)
             if res: return res
-            
-    elif isinstance(obj, str):
-        # 有时候 JSON 是以字符串形式存在的，尝试解包
-        if (obj.startswith("{") or obj.startswith("[")) and len(obj) > 50:
-            try:
-                nested_data = json.loads(obj)
-                res = find_moves_recursively(nested_data)
-                if res: return res
-            except: pass
-            
     return None
 
 def fetch_txwq_websocket(input_str: str):
     """
-    Websocket 全量捕获 + 深度递归清洗 + 失败显形
+    Websocket 全量捕获 + Base64 解码 + Zlib 解压
     """
     input_str = input_str.strip()
+    is_live_link = False
     full_share_url = input_str
-    
-    # ... (省略重复的 chrome_options 配置，保持不变，确保开启 performance log) ...
+    if "txwqshare" in input_str or "h5.txwq.qq.com" in input_str:
+        is_live_link = True
+        
+    if not is_live_link:
+        return None, "⚠️ 请输入完整的直播分享链接。"
+
+    # 配置 Chrome
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
@@ -385,65 +373,72 @@ def fetch_txwq_websocket(input_str: str):
     chrome_options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
     driver = None
-    captured_packets = [] # 用于存储抓到的原始包，供调试用
+    decoded_samples = [] # 用于调试：存储解码后的片段
 
     try:
         driver = webdriver.Chrome(options=chrome_options)
+        st.toast("正在接入直播流，准备解码...")
         driver.get(full_share_url)
-        time.sleep(8) # 稍微多等一下，让 WebSocket 多飞一会儿
+        time.sleep(8) 
 
         logs = driver.get_log("performance")
         raw_moves = None
         
-        # 1. 第一遍筛网：把所有 WebSocket 数据捞出来
         for entry in logs:
             try:
                 log_msg = json.loads(entry["message"])["message"]
                 if log_msg["method"] == "Network.webSocketFrameReceived":
                     payload = log_msg["params"]["response"]["payloadData"]
                     
-                    # 简单的清洗：去掉 Socket.io 的数字前缀 (如 "42" 或 "0")
-                    clean_payload = payload
-                    if len(payload) > 2 and payload[0].isdigit():
-                        # 尝试找到第一个 [ 或 {
-                        idx_list = payload.find("[")
-                        idx_dict = payload.find("{")
-                        start = min(idx for idx in [idx_list, idx_dict] if idx != -1)
-                        if start != -1:
-                            clean_payload = payload[start:]
-                    
-                    captured_packets.append(clean_payload[:500]) # 存个缩略图用于报错展示
-                    
-                    # 2. 第二遍筛网：深度递归搜索
+                    # 1. 尝试 Base64 解码
                     try:
-                        # 尝试解析外层 JSON
-                        data_obj = json.loads(clean_payload)
-                        # 扔进递归函数里找
-                        moves = find_moves_recursively(data_obj)
-                        if moves:
-                            raw_moves = moves
-                            break
-                    except:
-                        continue
-            except: continue
-        
-        # === 结果判定区 ===
-        if not raw_moves:
-            # 🔴 抓取失败时的 B 计划：展示“尸体”
-            # 如果没解析出来，我们把抓到的前 5 个数据包显示出来，让你看看到底是个啥
-            error_details = "\n\n".join([f"📦 包{i+1}: {p}..." for i, p in enumerate(captured_packets[:5])])
-            if not captured_packets:
-                return None, "❌ 监听成功，但未捕获到任何 WebSocket 数据帧。可能是 Chrome 版本或驱动不兼容。"
-            return None, f"❌ 捕获到 {len(captured_packets)} 个数据包，但递归搜索未发现棋谱特征。\n\n**原始数据样本 (请截图给我):**\n{error_details}"
+                        # 有些包可能带有数字前缀 "42xxx"，尝试清洗
+                        clean_payload = payload
+                        if len(payload) > 50 and not payload.startswith("{"):
+                             # 纯乱码通常是 Base64
+                             binary_data = base64.b64decode(clean_payload)
+                        else:
+                             # 看起来像明文的，跳过解码
+                             binary_data = payload.encode('utf-8')
+                        
+                        # 2. 尝试 Zlib 解压 (这是腾讯常用的手段)
+                        try:
+                            binary_data = zlib.decompress(binary_data)
+                        except: pass # 不是压缩包，直接用
+                        
+                        # 3. 尝试把二进制转回字符串，看看是不是 JSON
+                        decoded_text = binary_data.decode('utf-8', errors='ignore')
+                        
+                        # 存一点样本给前台看，方便调试
+                        if len(decoded_text) > 20:
+                            decoded_samples.append(decoded_text[:100])
 
-        # 3. 组装 SGF (保持不变)
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_DeepScan_Live]DT[{datetime.date.today()}]"
+                        # 4. 深度搜索 JSON
+                        if "{" in decoded_text or "[" in decoded_text:
+                            # 提取第一个 JSON 对象
+                            start = min([i for i in [decoded_text.find("{"), decoded_text.find("[")] if i != -1])
+                            json_candidate = decoded_text[start:]
+                            data_obj = json.loads(json_candidate)
+                            
+                            moves = find_moves_recursively(data_obj)
+                            if moves:
+                                raw_moves = moves
+                                break
+                    except: continue
+            except: continue
+            
+        if not raw_moves:
+            # 🔴 失败时展示解码后的东西，这一步能让我们看到真相
+            debug_info = "\n".join([f"🔓 解码样本 {i+1}: {s}" for i, s in enumerate(decoded_samples[:5])])
+            return None, f"❌ 解码成功但未匹配到棋谱。\n请截图以下【解码内容】给我：\n{debug_info}"
+
+        # 5. 组装 SGF
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Decoder_Live]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         for move in raw_moves:
             try:
-                # 兼容不同坐标格式：[0, 15, 3, 4] 或 [0, 15, x:3, y:4]
-                # 暴力取最后两个数字作为坐标
+                # 兼容不同格式
                 nums = [x for x in move if isinstance(x, (int, float))]
                 if len(nums) >= 4:
                     c = "B" if nums[0] == 0 else "W"
@@ -453,7 +448,7 @@ def fetch_txwq_websocket(input_str: str):
                         move_count += 1
             except: continue
 
-        return sgf_header + sgf_moves + ")", f"✅ 深度扫描成功！从复杂嵌套结构中提取 {move_count} 手。"
+        return sgf_header + sgf_moves + ")", f"✅ 破译成功！Base64+Zlib 解锁 {move_count} 手棋。"
 
     except Exception as e:
         return None, f"❌ 运行异常: {str(e)}"
@@ -528,34 +523,25 @@ with st.sidebar:
                 st.rerun()
     
     st.divider()
-    
     st.header("🛠 实用工具")
-    with st.expander("📡 腾讯围棋直播抓取 (WS版)", expanded=True):
-        st.caption("技术原理：通过 Chrome 底层 CDP 协议监听 WebSocket 直播流数据帧。")
-        
+    with st.expander("📡 腾讯围棋直播抓取 (解码版)", expanded=True):
+        st.caption("自动识别 Base64/Zlib 加密数据流")
         cid = st.text_input("输入直播分享链接", placeholder="https://h5.txwq.qq.com/txwqshare/...")
         
         if st.button("开始监听"):
             if cid:
-                with st.spinner("正在启动云端浏览器并接入直播流..."):
-                    # 调用新的 WebSocket 监听函数
+                with st.spinner("正在解码直播数据流..."):
                     sgf_text, status_msg = fetch_txwq_websocket(cid.strip())
                     
                     if sgf_text:
                         st.success(status_msg)
-                        # 生成文件名
                         fname = f"Live_Game_{datetime.datetime.now().strftime('%H%M')}.sgf"
-                        st.download_button(
-                            label="💾 下载 SGF 棋谱",
-                            data=sgf_text,
-                            file_name=fname,
-                            mime="application/x-go-sgf"
-                        )
+                        st.download_button("💾 下载 SGF", sgf_text, file_name=fname)
                     else:
                         st.error(status_msg)
             else:
                 st.warning("请先输入链接。")
-
+                
 # ========== 实时排行 & 多人 Elo 走势 ==========
 col_rank, col_trend = st.columns([1, 2])
 
