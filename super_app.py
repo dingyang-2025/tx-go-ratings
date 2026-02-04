@@ -3,10 +3,8 @@ import json
 import time
 import datetime
 import requests
-import base64  # 👈 新增：用于撕开乱码包装
-import zlib    # 👈 新增：用于解压数据
-import pandas as pd  # 👈 补全了！修复 NameError
-import altair as alt 
+import pandas as pd
+import altair as alt
 import streamlit as st
 from urllib.parse import urlparse, parse_qs
 
@@ -332,54 +330,22 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (终极诊断：开箱验货版) ---
-def find_moves_in_dict(obj, depth=0):
-    """
-    递归搜索棋谱，增加了对腾讯常见字段的特异性检查
-    """
-    if depth > 10: return None # 防止无限递归
-    
-    if isinstance(obj, list):
-        # 特征：列表长度>10，且第一个元素也是列表 [x, y, z]
-        if len(obj) > 10 and isinstance(obj[0], list) and len(obj[0]) >= 3:
-            try:
-                # 腾讯特征：前三个数里一定有两个是 <=18 的坐标
-                nums = [n for n in obj[0] if isinstance(n, (int, float))]
-                coords = [n for n in nums if 0 <= n <= 18]
-                if len(coords) >= 2:
-                    return obj
-            except: pass
-        
-        for item in obj:
-            res = find_moves_in_dict(item, depth+1)
-            if res: return res
-            
-    elif isinstance(obj, dict):
-        # 优先检查常见的棋谱字段名，提升命中率
-        target_keys = ['moves', 'list', 'chess', 'steps', 'records']
-        for key in target_keys:
-            if key in obj:
-                res = find_moves_in_dict(obj[key], depth+1)
-                if res: return res
-        
-        # 如果没找到，再遍历所有 value
-        for value in obj.values():
-            res = find_moves_in_dict(value, depth+1)
-            if res: return res
-            
-    return None
-
+# --- 腾讯围棋抓取工具 (终极胜利版：控制台拼图) ---
 def fetch_txwq_websocket(input_str: str):
     """
-    控制台窃听 + 失败时强制透视数据结构
+    基于用户验证成功的逻辑：
+    1. 劫持 console.log
+    2. 收集包含 {x, y, color, checkSyn} 的对象
+    3. 按 checkSyn (手数) 排序还原棋谱
     """
     input_str = input_str.strip()
     full_share_url = input_str
-    if "txwqshare" in input_str or "h5.txwq.qq.com" in input_str:
-        pass
-    else:
+    
+    # 简单的链接检查
+    if "txwqshare" not in input_str and "h5.txwq.qq.com" not in input_str:
         return None, "⚠️ 请输入完整的直播分享链接。"
 
+    # 配置无头浏览器
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
@@ -392,82 +358,98 @@ def fetch_txwq_websocket(input_str: str):
     try:
         driver = webdriver.Chrome(options=chrome_options)
 
-        # 👑 注入窃听代码 (保持不变，这部分工作完美)
+        # 👑 注入“碎片收集器”脚本
+        # 只要对象里同时有 x, y, color, checkSyn，它就是我们要找的棋子！
         hijack_script = """
-        window.__captured_chess_data = [];
+        window.__collected_moves = [];
         var originalLog = console.log;
         var originalInfo = console.info;
-        function checkAndCapture(args) {
-            for (var i = 0; i < args.length; i++) {
-                var arg = args[i];
-                if (arg && typeof arg === 'object') {
-                    // 只要有 chessData 且不为空，就抓
-                    if (arg.chessData) {
-                        window.__captured_chess_data.push(arg.chessData);
-                    }
-                    else if (arg.moves || arg.subChunks) {
-                         window.__captured_chess_data.push(arg);
-                    }
+        
+        function scanArg(arg) {
+            if (arg && typeof arg === 'object') {
+                // 🎯 核心特征匹配：你验证过的 x, y, checkSyn
+                if ('x' in arg && 'y' in arg && 'color' in arg && 'checkSyn' in arg) {
+                    window.__collected_moves.push(arg);
+                }
+                // 有时候棋子包在 chessData 里，多搜一层
+                else if (arg.chessData && 'x' in arg.chessData) {
+                    window.__collected_moves.push(arg.chessData);
+                }
+                // 递归防止漏掉藏在数组里的
+                else if (Array.isArray(arg)) {
+                    arg.forEach(item => scanArg(item));
                 }
             }
         }
-        console.log = function() { checkAndCapture(arguments); originalLog.apply(console, arguments); };
-        console.info = function() { checkAndCapture(arguments); originalInfo.apply(console, arguments); };
+
+        function hijack(args) {
+            for (var i = 0; i < args.length; i++) {
+                scanArg(args[i]);
+            }
+        }
+
+        console.log = function() { hijack(arguments); originalLog.apply(console, arguments); };
+        console.info = function() { hijack(arguments); originalInfo.apply(console, arguments); };
         """
         driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': hijack_script})
 
-        st.toast("正在潜入控制台...")
+        st.toast("正在潜入直播间，等待历史棋谱加载...")
         driver.get(full_share_url)
         
-        raw_moves = None
-        captured_list = []
+        collected_data = []
         
-        # 轮询 12 秒
-        for i in range(12): 
+        # 轮询 15 秒，确保历史棋谱（几百手棋）全部打印出来
+        for i in range(15): 
             time.sleep(1)
-            captured_list = driver.execute_script("return window.__captured_chess_data;")
+            collected_data = driver.execute_script("return window.__collected_moves;")
             
-            if captured_list and len(captured_list) > 0:
-                for data_item in captured_list:
-                    found = find_moves_in_dict(data_item)
-                    if found:
-                        raw_moves = found
-                        break
-            if raw_moves: break
+            # 如果收集到了超过 10 手棋，且数量不再变化，说明加载完了
+            if collected_data and len(collected_data) > 10:
+                # 简单防抖：连续两次数量一致才算完
+                time.sleep(1)
+                new_len = len(driver.execute_script("return window.__collected_moves;"))
+                if new_len == len(collected_data):
+                    break
         
-        # === 🚑 诊断核心区 ===
-        if not raw_moves:
-             debug_msg = ""
-             if captured_list:
-                 debug_msg += f"共捕获 {len(captured_list)} 个数据包，内部结构如下：\n\n"
-                 for idx, packet in enumerate(captured_list[:3]): # 只展示前3个
-                     # 强制转 JSON 字符串，防止格式隐藏
-                     packet_str = json.dumps(packet, default=str, ensure_ascii=False)
-                     # 截取前 800 个字符展示，足够看清 key 了
-                     debug_msg += f"📦 [包 {idx+1}] (前800字符):\n{packet_str[:800]}\n\n{'-'*30}\n"
-             else:
-                 debug_msg = "未捕获到任何包含 chessData 的对象。"
-                 
-             return None, f"❌ 自动解析失败。请截图以下【数据结构】给我，我立马就能写出针对性代码：\n{debug_msg}"
+        if not collected_data:
+             return None, "❌ 监听超时。控制台未打印符合特征的棋谱数据，可能是直播已结束或权限受限。"
 
-        # 组装 SGF (逻辑不变)
+        # === 🧩 拼图核心逻辑 ===
+        
+        # 1. 去重：网络可能会发重复包，用 checkSyn 做唯一 Key
+        # checkSyn 就是手数 (107, 108...)
+        unique_moves = {}
+        for m in collected_data:
+            if 'checkSyn' in m:
+                unique_moves[m['checkSyn']] = m
+        
+        if not unique_moves:
+             return None, "❌ 收集到了数据，但缺少 checkSyn 字段，无法排序。"
+
+        # 2. 排序：按手数从小到大排列 (1, 2, 3 ... 108)
+        sorted_moves = sorted(unique_moves.values(), key=lambda x: x['checkSyn'])
+        
+        # 3. 组装 SGF
         sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Console_Hack]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
-        for move in raw_moves:
+        
+        for move in sorted_moves:
             try:
-                nums = [x for x in move if isinstance(x, (int, float))]
-                coords = [n for n in nums if 0 <= n <= 18]
-                if len(coords) >= 2:
-                    x, y = int(coords[-2]), int(coords[-1])
-                    c = "B" if move_count % 2 == 0 else "W"
-                    if nums[0] == 0: c = "B"
-                    elif nums[0] == 1: c = "W"
+                x = int(move['x'])
+                y = int(move['y'])
+                color_val = int(move['color'])
+                
+                # 腾讯规则验证：1=黑, 2=白 (符合你的观测)
+                c = "B" if color_val == 1 else "W"
+                
+                if 0 <= x <= 18 and 0 <= y <= 18:
                     sgf_moves += f";{c}[{num_to_sgf(x)}{num_to_sgf(y)}]"
                     move_count += 1
             except: continue
 
-        return sgf_header + sgf_moves + ")", f"✅ 提取成功！共 {move_count} 手。"
+        status_msg = f"✅ 抓取成功！利用 checkSyn 完美还原 {move_count} 手棋。"
+        return sgf_header + sgf_moves + ")", status_msg
 
     except Exception as e:
         return None, f"❌ 运行异常: {str(e)}"
@@ -542,20 +524,28 @@ with st.sidebar:
                 st.rerun()
     
     st.divider()
+    
     st.header("🛠 实用工具")
-    with st.expander("📡 腾讯围棋直播抓取 (解码版)", expanded=True):
-        st.caption("自动识别 Base64/Zlib 加密数据流")
+    with st.expander("📡 腾讯围棋直播抓取 (Console版)", expanded=True):
+        st.caption("技术原理：劫持浏览器控制台日志，利用 checkSyn 字段重组棋谱。")
+        
         cid = st.text_input("输入直播分享链接", placeholder="https://h5.txwq.qq.com/txwqshare/...")
         
-        if st.button("开始监听"):
+        if st.button("开始抓取"):
             if cid:
-                with st.spinner("正在解码直播数据流..."):
+                with st.spinner("正在启动云端浏览器并收集棋谱..."):
                     sgf_text, status_msg = fetch_txwq_websocket(cid.strip())
                     
                     if sgf_text:
                         st.success(status_msg)
+                        # 生成文件名：Live_Game_时间.sgf
                         fname = f"Live_Game_{datetime.datetime.now().strftime('%H%M')}.sgf"
-                        st.download_button("💾 下载 SGF", sgf_text, file_name=fname)
+                        st.download_button(
+                            label="💾 下载 SGF 棋谱",
+                            data=sgf_text,
+                            file_name=fname,
+                            mime="application/x-go-sgf"
+                        )
                     else:
                         st.error(status_msg)
             else:
