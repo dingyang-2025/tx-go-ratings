@@ -330,12 +330,12 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (双管齐下：控制台窃听 + 内存暴力搜查) ---
+# --- 腾讯围棋抓取工具 (终极完结：全频道监听 + opList 爆破) ---
 def fetch_txwq_websocket(input_str: str):
     """
-    终极融合版：
-    1. 方案A (窃听): 劫持 console.log 获取实时更新的棋子。
-    2. 方案B (搜身): 深度扫描 window 和 Vue 实例，挖掘已加载的历史棋谱。
+    终极修正版：
+    1. 新增 console.warn 监听（关键！历史数据在黄色警告里）。
+    2. 定向解析 opList 和 setPieceList 结构。
     """
     input_str = input_str.strip()
     full_share_url = input_str
@@ -355,146 +355,134 @@ def fetch_txwq_websocket(input_str: str):
     try:
         driver = webdriver.Chrome(options=chrome_options)
 
-        # 👑 1. 注入“窃听器” (Plan A)
+        # 👑 注入“全频道”监听器
         hijack_script = """
         window.__collected_moves = [];
         var originalLog = console.log;
+        var originalInfo = console.info;
+        var originalWarn = console.warn; // 👈 关键新增：监听黄色警告
         
-        // 实时拦截
         function scanArg(arg) {
             if (arg && typeof arg === 'object') {
+                // 🎯 1. 直接命中棋子 (x, y, color)
                 if ('x' in arg && 'y' in arg && 'color' in arg) {
                     window.__collected_moves.push(arg);
                 }
-                else if (arg.chessData) scanArg(arg.chessData);
-                else if (Array.isArray(arg)) arg.forEach(item => scanArg(item));
-            }
-        }
-        console.log = function() { scanArg(arguments[0]); originalLog.apply(console, arguments); };
-        
-        // 👑 2. 注入“内存搜查令” (Plan B)
-        // 主动遍历内存，寻找历史棋谱数组
-        window.__memory_scan_result = [];
-        window.scanMemoryForHistory = function() {
-            var foundMoves = [];
-            var seen = new Set();
-            
-            function isMove(obj) {
-                return obj && typeof obj === 'object' && 
-                       'x' in obj && typeof obj.x === 'number' &&
-                       'y' in obj && typeof obj.y === 'number' &&
-                       'color' in obj;
-            }
-
-            function deepSearch(obj, depth) {
-                if (depth > 6) return; // 控制搜索深度防止卡死
-                if (!obj || typeof obj !== 'object') return;
-                if (seen.has(obj)) return;
-                seen.add(obj);
-
-                // 特征识别：如果这是一个数组，且里面装着棋子
-                if (Array.isArray(obj) && obj.length > 5) {
-                    // 抽查前几个元素，看是否像棋子
-                    var validCount = 0;
-                    for(var i=0; i<Math.min(obj.length, 5); i++) {
-                        if (isMove(obj[i])) validCount++;
-                    }
-                    if (validCount >= 3) {
-                        // 找到了！这就是历史棋谱数组！
-                        obj.forEach(m => foundMoves.push(m));
-                        return;
-                    }
+                
+                // 🎯 2. 命中 opList (你截图里的大包)
+                else if (arg.opList && Array.isArray(arg.opList)) {
+                    arg.opList.forEach(op => {
+                        // opList 里的棋子通常藏在 data 字段里 (opType: 203)
+                        if (op.data) scanArg(op.data);
+                        // 或者直接在 setPieceList 里
+                        if (op.setPieceList) scanArg(op.setPieceList);
+                        // 或者它自己就是棋子
+                        scanArg(op);
+                    });
                 }
-
-                // 递归搜索 (优先搜索 Vue 的 data)
-                try {
-                    for (var key in obj) {
-                        // 跳过一些巨大的无关对象
-                        if (key === 'webpackJsonp' || key === 'document') continue; 
-                        deepSearch(obj[key], depth + 1);
-                        if (foundMoves.length > 0) return; // 找到一组就收工
-                    }
-                } catch(e) {}
+                
+                // 🎯 3. 命中 setPieceList (摆子列表)
+                else if (arg.setPieceList && Array.isArray(arg.setPieceList)) {
+                    arg.setPieceList.forEach(item => scanArg(item));
+                }
+                
+                // 递归搜索：防止藏在其他数组或对象里
+                else if (Array.isArray(arg)) {
+                    arg.forEach(item => scanArg(item));
+                }
+                else if (arg.list && Array.isArray(arg.list)) {
+                    arg.list.forEach(item => scanArg(item));
+                }
+                else if (arg.data) { // 很多包有一层 data 壳
+                     scanArg(arg.data);
+                }
             }
-
-            // 从 Vue 的根节点开始搜 (效率最高)
-            var vueRoot = document.getElementById('app') ? document.getElementById('app').__vue__ : null;
-            if (vueRoot) {
-                deepSearch(vueRoot.$data, 0);
-                if (foundMoves.length === 0) deepSearch(vueRoot.$store, 0);
-            }
-            
-            // 如果 Vue 搜不到，就去 window 全局变量里碰运气
-            if (foundMoves.length === 0) deepSearch(window, 0);
-            
-            window.__memory_scan_result = foundMoves;
         }
+
+        function hijack(args) {
+            for (var i = 0; i < args.length; i++) {
+                scanArg(args[i]);
+            }
+        }
+
+        // 监听所有频道，确保不再漏网
+        console.log = function() { hijack(arguments); originalLog.apply(console, arguments); };
+        console.info = function() { hijack(arguments); originalInfo.apply(console, arguments); };
+        console.warn = function() { hijack(arguments); originalWarn.apply(console, arguments); }; // 👈 抓住你了！
         """
         driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': hijack_script})
 
-        st.toast("正在潜入直播间...")
+        st.toast("正在全频道窃听（含Warn日志）...")
         driver.get(full_share_url)
-        time.sleep(5) # 等待页面加载
         
-        # === 第一阶段：检查窃听结果 ===
-        collected_data = driver.execute_script("return window.__collected_moves;")
+        collected_data = []
         
-        # === 第二阶段：如果没抓到或者抓得太少，启动内存搜查 ===
-        if not collected_data or len(collected_data) < 10:
-            st.toast("控制台安静，正在执行内存深度搜查 (寻找历史棋谱)...")
-            driver.execute_script("window.scanMemoryForHistory();")
-            time.sleep(2) # 给搜索一点时间
-            memory_data = driver.execute_script("return window.__memory_scan_result;")
+        # 轮询 15 秒
+        for i in range(15): 
+            time.sleep(1)
+            collected_data = driver.execute_script("return window.__collected_moves;")
             
-            if memory_data:
-                st.toast(f"🎉 内存搜查成功！挖出 {len(memory_data)} 手历史棋谱！")
-                collected_data.extend(memory_data)
+            # 如果抓到了 >20 手棋，说明那个大包 opList 已经被我们拆开了
+            if collected_data and len(collected_data) > 20:
+                time.sleep(1) # 防抖
+                break
         
         if not collected_data:
-             return None, "❌ 抓取失败。控制台无日志，内存扫描也未发现棋谱特征。"
+             return None, "❌ 监听超时。未捕获到任何棋谱数据。请确认直播是否已结束。"
 
-        # === 🧩 智能拼图与去重 ===
+        # === 🧩 智能拼图 ===
         unique_moves = []
         seen_fingerprints = set()
         
-        # 排序策略：
-        # 1. 优先按 checkSyn (序列号) 排序
-        # 2. 如果没有 checkSyn，则保持原有的数组顺序 (历史记录通常本身就是有序的)
+        # 预处理：分离有序号和无序号的
+        moves_with_seq = []
+        moves_no_seq = []
         
-        # 分离
-        moves_with_seq = [m for m in collected_data if 'checkSyn' in m]
-        moves_no_seq = [m for m in collected_data if 'checkSyn' not in m]
+        for m in collected_data:
+            # 尝试各种可能的序号字段
+            seq = None
+            if 'checkSyn' in m: seq = m['checkSyn']
+            elif 'step' in m: seq = m['step']
+            elif 'seq' in m: seq = m['seq']
+            
+            if seq is not None:
+                 m['_sort_key'] = seq
+                 moves_with_seq.append(m)
+            else:
+                moves_no_seq.append(m)
         
-        # 排序有序号的
-        moves_with_seq.sort(key=lambda x: x['checkSyn'])
+        # 排序
+        moves_with_seq.sort(key=lambda x: x['_sort_key'])
         
-        # 合并：通常无序号的历史在前，有序号的直播在后
+        # 合并： opList (通常在最前面被打印) + 直播流
+        # 如果 opList 内部带序号，上面的排序已经搞定了一切。
+        # 如果不带，它会保留在 moves_no_seq 里，按数组原有顺序排列（通常也是对的）。
         all_candidates = moves_no_seq + moves_with_seq
         
         for m in all_candidates:
             try:
-                # 强转 int 清洗数据
                 x = int(m['x'])
                 y = int(m['y'])
                 c = int(m['color'])
                 
-                # 去重指纹
                 fingerprint = f"{x},{y},{c}"
                 if fingerprint not in seen_fingerprints:
                     seen_fingerprints.add(fingerprint)
                     unique_moves.append(m)
             except: continue
 
-        # 组装 SGF
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Memory_Hunter]DT[{datetime.date.today()}]"
+        # 3. 组装 SGF
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Final_Hack]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         
         for move in unique_moves:
             try:
-                x, y, color_val = int(move['x']), int(move['y']), int(move['color'])
+                x = int(move['x'])
+                y = int(move['y'])
+                color_val = int(move['color'])
                 
-                # 颜色映射
+                # 颜色逻辑：1=黑, 2=白 (根据 opList 截图确认)
                 c = "B"
                 if color_val == 2: c = "W"
                 elif color_val == 1: c = "B"
@@ -505,7 +493,7 @@ def fetch_txwq_websocket(input_str: str):
                     move_count += 1
             except: continue
 
-        return sgf_header + sgf_moves + ")", f"✅ 抓取成功！历史+直播共提取 {move_count} 手。"
+        return sgf_header + sgf_moves + ")", f"✅ 历史记录提取成功！共 {move_count} 手。"
 
     except Exception as e:
         return None, f"❌ 运行异常: {str(e)}"
@@ -583,7 +571,7 @@ with st.sidebar:
     
     st.header("🛠 实用工具")
     with st.expander("📡 腾讯围棋直播抓取 (终极版)", expanded=True):
-        st.caption("技术原理：控制台日志劫持 + 历史数据全量递归提取。")
+        st.caption("技术原理：劫持 Console (含 Warn) + opList 定向解析。")
         
         cid = st.text_input("输入直播分享链接", placeholder="https://h5.txwq.qq.com/txwqshare/...")
         
@@ -594,7 +582,6 @@ with st.sidebar:
                     
                     if sgf_text:
                         st.success(status_msg)
-                        # 生成文件名：Live_Game_时间.sgf
                         fname = f"Live_Game_{datetime.datetime.now().strftime('%H%M')}.sgf"
                         st.download_button(
                             label="💾 下载 SGF 棋谱",
