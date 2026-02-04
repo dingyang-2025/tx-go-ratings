@@ -330,12 +330,12 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (终极完结：全频道监听 + opList 爆破) ---
+# --- 腾讯围棋抓取工具 (终极修正：穿透 roomDetail 解析) ---
 def fetch_txwq_websocket(input_str: str):
     """
     终极修正版：
-    1. 新增 console.warn 监听（关键！历史数据在黄色警告里）。
-    2. 定向解析 opList 和 setPieceList 结构。
+    1. 修正嵌套路径：专门解析 arg.roomDetail.opList (对应截图结构)。
+    2. 全面监听：Log + Info + Warn + Error 全部劫持。
     """
     input_str = input_str.strip()
     full_share_url = input_str
@@ -355,46 +355,47 @@ def fetch_txwq_websocket(input_str: str):
     try:
         driver = webdriver.Chrome(options=chrome_options)
 
-        # 👑 注入“全频道”监听器
+        # 👑 注入“穿透式”监听器
         hijack_script = """
         window.__collected_moves = [];
         var originalLog = console.log;
         var originalInfo = console.info;
-        var originalWarn = console.warn; // 👈 关键新增：监听黄色警告
+        var originalWarn = console.warn;
+        var originalError = console.error; // 🛡️以此类推，防止漏网
         
+        function extractMovesFromOpList(list) {
+            if (!Array.isArray(list)) return;
+            list.forEach(op => {
+                // 截图显示数据在 data 字段里 (opType: 203)
+                if (op.data) scanArg(op.data);
+                // 有时候直接是棋子
+                else scanArg(op);
+            });
+        }
+
         function scanArg(arg) {
             if (arg && typeof arg === 'object') {
-                // 🎯 1. 直接命中棋子 (x, y, color)
-                if ('x' in arg && 'y' in arg && 'color' in arg) {
+                // 🎯 1. 终极修正：先检查 roomDetail (截图里的外壳)
+                if (arg.roomDetail && arg.roomDetail.opList) {
+                    extractMovesFromOpList(arg.roomDetail.opList);
+                }
+                
+                // 🎯 2. 直接检查 opList (防止结构变化)
+                else if (arg.opList) {
+                    extractMovesFromOpList(arg.opList);
+                }
+
+                // 🎯 3. 标准棋子特征 (x, y, color)
+                else if ('x' in arg && 'y' in arg && 'color' in arg) {
                     window.__collected_moves.push(arg);
                 }
                 
-                // 🎯 2. 命中 opList (你截图里的大包)
-                else if (arg.opList && Array.isArray(arg.opList)) {
-                    arg.opList.forEach(op => {
-                        // opList 里的棋子通常藏在 data 字段里 (opType: 203)
-                        if (op.data) scanArg(op.data);
-                        // 或者直接在 setPieceList 里
-                        if (op.setPieceList) scanArg(op.setPieceList);
-                        // 或者它自己就是棋子
-                        scanArg(op);
-                    });
-                }
-                
-                // 🎯 3. 命中 setPieceList (摆子列表)
-                else if (arg.setPieceList && Array.isArray(arg.setPieceList)) {
-                    arg.setPieceList.forEach(item => scanArg(item));
-                }
-                
-                // 递归搜索：防止藏在其他数组或对象里
+                // 递归搜索：防止藏在 list 或其他数组里
                 else if (Array.isArray(arg)) {
                     arg.forEach(item => scanArg(item));
                 }
                 else if (arg.list && Array.isArray(arg.list)) {
                     arg.list.forEach(item => scanArg(item));
-                }
-                else if (arg.data) { // 很多包有一层 data 壳
-                     scanArg(arg.data);
                 }
             }
         }
@@ -405,14 +406,15 @@ def fetch_txwq_websocket(input_str: str):
             }
         }
 
-        // 监听所有频道，确保不再漏网
+        // 全面监听所有频道
         console.log = function() { hijack(arguments); originalLog.apply(console, arguments); };
         console.info = function() { hijack(arguments); originalInfo.apply(console, arguments); };
-        console.warn = function() { hijack(arguments); originalWarn.apply(console, arguments); }; // 👈 抓住你了！
+        console.warn = function() { hijack(arguments); originalWarn.apply(console, arguments); };
+        console.error = function() { hijack(arguments); originalError.apply(console, arguments); };
         """
         driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': hijack_script})
 
-        st.toast("正在全频道窃听（含Warn日志）...")
+        st.toast("正在全频道窃听（含 roomDetail 深度解析）...")
         driver.get(full_share_url)
         
         collected_data = []
@@ -422,31 +424,32 @@ def fetch_txwq_websocket(input_str: str):
             time.sleep(1)
             collected_data = driver.execute_script("return window.__collected_moves;")
             
-            # 如果抓到了 >20 手棋，说明那个大包 opList 已经被我们拆开了
-            if collected_data and len(collected_data) > 20:
-                time.sleep(1) # 防抖
+            # 只要抓到了数据，大概率就是成功了
+            if collected_data and len(collected_data) > 5:
+                # 再等1秒确保 opList 解析完
+                time.sleep(1) 
                 break
         
         if not collected_data:
-             return None, "❌ 监听超时。未捕获到任何棋谱数据。请确认直播是否已结束。"
+             return None, "❌ 监听超时。未捕获到数据。请确认：\n1. 直播链接是否正确。\n2. 页面是否成功加载。"
 
         # === 🧩 智能拼图 ===
         unique_moves = []
         seen_fingerprints = set()
         
-        # 预处理：分离有序号和无序号的
+        # 分离有序号和无序号的
         moves_with_seq = []
         moves_no_seq = []
         
         for m in collected_data:
-            # 尝试各种可能的序号字段
+            # 提取序号
             seq = None
             if 'checkSyn' in m: seq = m['checkSyn']
             elif 'step' in m: seq = m['step']
             elif 'seq' in m: seq = m['seq']
             
             if seq is not None:
-                 m['_sort_key'] = seq
+                 m['_sort_key'] = int(seq)
                  moves_with_seq.append(m)
             else:
                 moves_no_seq.append(m)
@@ -454,9 +457,7 @@ def fetch_txwq_websocket(input_str: str):
         # 排序
         moves_with_seq.sort(key=lambda x: x['_sort_key'])
         
-        # 合并： opList (通常在最前面被打印) + 直播流
-        # 如果 opList 内部带序号，上面的排序已经搞定了一切。
-        # 如果不带，它会保留在 moves_no_seq 里，按数组原有顺序排列（通常也是对的）。
+        # 合并：通常无序号的 opList 是历史数据，排在有序号的直播数据之前
         all_candidates = moves_no_seq + moves_with_seq
         
         for m in all_candidates:
@@ -471,8 +472,8 @@ def fetch_txwq_websocket(input_str: str):
                     unique_moves.append(m)
             except: continue
 
-        # 3. 组装 SGF
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Final_Hack]DT[{datetime.date.today()}]"
+        # 组装 SGF
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Deep_Hack]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         
@@ -482,7 +483,7 @@ def fetch_txwq_websocket(input_str: str):
                 y = int(move['y'])
                 color_val = int(move['color'])
                 
-                # 颜色逻辑：1=黑, 2=白 (根据 opList 截图确认)
+                # 颜色逻辑：1=黑, 2=白 (兼容 0/1)
                 c = "B"
                 if color_val == 2: c = "W"
                 elif color_val == 1: c = "B"
@@ -499,7 +500,7 @@ def fetch_txwq_websocket(input_str: str):
         return None, f"❌ 运行异常: {str(e)}"
     finally:
         if driver: driver.quit()
-
+            
 # ===============================
 # 页面主逻辑
 # ===============================
