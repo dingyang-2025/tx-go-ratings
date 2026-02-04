@@ -1,9 +1,19 @@
 import os
+import json
+import time
 import datetime
 import requests
-import altair as alt
-import pandas as pd
+from urllib.parse import urlparse, parse_qs
 import streamlit as st
+
+# Selenium 核心库
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+
+# 辅助函数：数字坐标转 SGF 字母
+def num_to_sgf(n):
+    return chr(ord('a') + n)
 
 # 可选：按中文拼音排序
 try:
@@ -318,23 +328,113 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 ---
-def fetch_txwq_content(chessid: str):
-    """从腾讯接口获取 SGF 内容"""
-    url = "http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess"
-    data = {"chessid": chessid}
+# --- 腾讯围棋抓取工具 (终极 WebSocket 监听版) ---
+def fetch_txwq_websocket(input_str: str):
+    """
+    终极解法：通过 Chrome Performance Log 监听底层 WebSocket 通信帧
+    直接截获直播流数据
+    """
+    input_str = input_str.strip()
+    
+    # 1. 链接校验与参数提取
+    is_live_link = False
+    full_share_url = input_str
+    if "txwqshare" in input_str or "h5.txwq.qq.com" in input_str:
+        is_live_link = True
+    
+    if not is_live_link:
+        return None, "⚠️ 请输入完整的直播分享链接（包含 svrid, roomid 等参数）。"
+
+    # 2. 配置 Chrome (开启性能日志是关键)
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new") # 无头模式
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
+    # 👑 核心：开启 Performance Logging (这就是窃听电话的录音机)
+    chrome_options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
+
+    driver = None
     try:
-        resp = requests.post(url, data=data, timeout=10)
-        resp.raise_for_status()
-        js = resp.json()
-        if js.get("result") == 0:
-            return js.get("chess")
-        else:
-            st.error(f"API 报错: {js.get('resultstr')}")
-            return None
+        driver = webdriver.Chrome(options=chrome_options)
+        
+        st.toast("正在接入 WebSocket 直播流...")
+        driver.get(full_share_url)
+        
+        # 👑 必须等待：WebSocket 需要握手并接收首个全量数据包
+        # 直播数据通常在连接建立后的前几秒内发送
+        time.sleep(6) 
+
+        st.toast("正在分析通信数据帧...")
+        
+        # 3. 捞取日志，寻找棋谱
+        logs = driver.get_log("performance")
+        raw_moves = None
+        
+        for entry in logs:
+            try:
+                log_msg = json.loads(entry["message"])["message"]
+                
+                # 只关心 WebSocket 接收到的帧 (Network.webSocketFrameReceived)
+                if log_msg["method"] == "Network.webSocketFrameReceived":
+                    # 提取数据载荷
+                    payload = log_msg["params"]["response"]["payloadData"]
+                    
+                    # 4. 暴力特征匹配：寻找长得很像棋谱的数组 "[[0,1,16,3], ...]"
+                    # 腾讯棋谱特征：嵌套列表，包含数字，长度通常比较长
+                    if "[[" in payload and "]]" in payload:
+                        # 简单的字符串清洗，尝试提取 JSON 数组部分
+                        start_idx = payload.find("[[")
+                        # 向后找可能的结尾
+                        potential_end = payload.rfind("]]") + 2
+                        candidate_str = payload[start_idx : potential_end]
+                        
+                        try:
+                            data = json.loads(candidate_str)
+                            # 验证是否为真棋谱：
+                            # 1. 是列表 2. 长度>10 (排除空包) 3. 第一个元素也是列表 4. 包含数字
+                            if (isinstance(data, list) and len(data) > 10 and 
+                                isinstance(data[0], list) and len(data[0]) >= 4 and
+                                isinstance(data[0][2], int)):
+                                raw_moves = data
+                                break # 找到了！收工！
+                        except:
+                            continue
+            except:
+                continue
+            if raw_moves: break
+            
+        if not raw_moves:
+            return None, "❌ 监听成功，但未解析到有效棋谱。可能对局尚未开始或已结束。"
+
+        # 5. 组装 SGF
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_WebSocket_Live]DT[{datetime.date.today()}]"
+        sgf_moves = ""
+        move_count = 0
+        for move in raw_moves:
+            try:
+                # 腾讯格式通常是: [颜色(0黑1白), 手数, X, Y, ...]
+                c = "B" if move[0] == 0 else "W"
+                x, y = int(move[2]), int(move[3]) # 注意：有时候下标是 2和3，有时候是 -2和-1，视版本而定，这里取通用逻辑
+                # 保险起见，尝试适配两种格式
+                if x > 18: x = int(move[-2])
+                if y > 18: y = int(move[-1])
+                
+                if 0 <= x <= 18 and 0 <= y <= 18:
+                    sgf_moves += f";{c}[{num_to_sgf(x)}{num_to_sgf(y)}]"
+                    move_count += 1
+            except: continue
+
+        return sgf_header + sgf_moves + ")", f"✅ 完美破局！从 WebSocket 流截获 {move_count} 手。"
+
     except Exception as e:
-        st.error(f"连接失败: {e}")
-        return None
+        return None, f"❌ 监听异常: {str(e)}"
+    finally:
+        if driver:
+            driver.quit()
 
 # ===============================
 # 页面主逻辑
@@ -403,28 +503,34 @@ with st.sidebar:
                 st.success(f"已保存：{p1} vs {p2}（胜者：{final_winner}）")
                 st.rerun()
     
-    st.divider()  # 加一条分割线
+    st.divider()
     
-    # 新增：腾讯围棋抓取小工具
     st.header("🛠 实用工具")
-    with st.expander("📥 腾讯围棋棋谱抓取"):
-        st.caption("输入对局 ID 即可提取 SGF 文件")
-        cid = st.text_input("Chess ID", placeholder="如: 1770092663030101341")
-        if st.button("获取并准备下载"):
+    with st.expander("📡 腾讯围棋直播抓取 (WS版)", expanded=True):
+        st.caption("技术原理：通过 Chrome 底层 CDP 协议监听 WebSocket 直播流数据帧。")
+        
+        cid = st.text_input("输入直播分享链接", placeholder="https://h5.txwq.qq.com/txwqshare/...")
+        
+        if st.button("开始监听"):
             if cid:
-                with st.spinner("抓取中..."):
-                    sgf_text = fetch_txwq_content(cid.strip())
+                with st.spinner("正在启动云端浏览器并接入直播流..."):
+                    # 调用新的 WebSocket 监听函数
+                    sgf_text, status_msg = fetch_txwq_websocket(cid.strip())
+                    
                     if sgf_text:
-                        st.success("抓取成功！")
-                        # 提供下载按钮
+                        st.success(status_msg)
+                        # 生成文件名
+                        fname = f"Live_Game_{datetime.datetime.now().strftime('%H%M')}.sgf"
                         st.download_button(
-                            label="💾 点击下载 SGF",
+                            label="💾 下载 SGF 棋谱",
                             data=sgf_text,
-                            file_name=f"TXWQ_{cid}.sgf",
-                            mime="text/plain"
+                            file_name=fname,
+                            mime="application/x-go-sgf"
                         )
+                    else:
+                        st.error(status_msg)
             else:
-                st.warning("请输入有效 ID")
+                st.warning("请先输入链接。")
 
 # ========== 实时排行 & 多人 Elo 走势 ==========
 col_rank, col_trend = st.columns([1, 2])
