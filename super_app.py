@@ -1,21 +1,9 @@
 import os
-import json
-import time
 import datetime
 import requests
-import pandas as pd
 import altair as alt
+import pandas as pd
 import streamlit as st
-from urllib.parse import urlparse, parse_qs
-
-# Selenium 核心库
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-
-# 辅助函数：数字坐标转 SGF 字母
-def num_to_sgf(n):
-    return chr(ord('a') + n)
 
 # 可选：按中文拼音排序
 try:
@@ -330,124 +318,24 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (Vuex 定点爆破版) ---
-def fetch_txwq_websocket(input_str: str):
-    """
-    终极思路：
-    基于用户雷达扫描结果。
-    数据精确位置：document.getElementById('app').__vue__.$store.state.chess_data
-    直接读取该变量，解析 SGF。
-    """
-    input_str = input_str.strip()
-    if "txwqshare" not in input_str and "h5.txwq.qq.com" not in input_str:
-        return None, "⚠️ 请输入完整的直播分享链接。"
-
-    # 1. 强力反爬 + 手机伪装 (保持不变，确保页面正常加载)
-    mobile_emulation = {
-        "deviceMetrics": { "width": 375, "height": 812, "pixelRatio": 3.0 },
-        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1"
-    }
-    
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("mobileEmulation", mobile_emulation)
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option('useAutomationExtension', False)
-
-    driver = None
+# --- 腾讯围棋抓取工具 ---
+def fetch_txwq_content(chessid: str):
+    """从腾讯接口获取 SGF 内容"""
+    url = "http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess"
+    data = {"chessid": chessid}
     try:
-        driver = webdriver.Chrome(options=chrome_options)
-        
-        # 隐藏 webdriver 特征
-        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-        })
-
-        st.toast("正在启动...")
-        driver.get(input_str)
-        
-        # 2. 等待数据加载
-        # 既然数据在 Vuex 里，我们只需要等页面渲染出棋盘，数据自然就准备好了
-        time.sleep(10)
-        
-        # 3. 👑 定点爆破：直接提取 image_1b82a0.png 里的路径
-        extraction_script = """
-        try {
-            var app = document.getElementById('app');
-            if (app && app.__vue__ && app.__vue__.$store && app.__vue__.$store.state) {
-                // 这就是你截图里找到的宝藏
-                return app.__vue__.$store.state.chess_data;
-            }
-        } catch(e) { return null; }
-        return null;
-        """
-        
-        memory_data = driver.execute_script(extraction_script)
-        
-        if not memory_data:
-            # 万一提取失败，截图看看是不是白屏了
-            screenshot = driver.get_screenshot_as_base64()
-            return None, (f"❌ 提取失败。虽然路径已确认，但脚本返回了空值。\n可能是页面未加载完成。", screenshot)
-
-        st.toast(f"🎉 成功锁定内存！获取到 {len(memory_data)} 手数据。")
-
-        # === 4. 数据清洗与组装 ===
-        unique_moves = []
-        seen = set()
-        
-        # 遍历数组，提取坐标
-        for item in memory_data:
-            m = None
-            # 兼容多种可能的数据结构
-            # 情况A: 直接是 {x:1, y:2, color:1}
-            if 'x' in item and 'y' in item and 'color' in item:
-                m = item
-            # 情况B: 嵌套在 data 里 {data: {x:1...}}
-            elif 'data' in item and item['data'] and 'x' in item['data']:
-                m = item['data']
-            # 情况C: 腾讯特有的 Protobuf 解码后结构
-            elif 'x' in item and 'y' in item: # 有些步骤可能没有 color (如 pass)
-                 m = item
-            
-            if m:
-                try:
-                    x = int(m['x'])
-                    y = int(m['y'])
-                    # 颜色处理：有时候 color 也是 float，强制转 int
-                    c = int(m.get('color', 0)) 
-                    
-                    # 过滤无效坐标 (腾讯有时候会发 -1 或 19 表示停着/虚手)
-                    if 0 <= x <= 18 and 0 <= y <= 18:
-                        fingerprint = f"{x},{y},{c}"
-                        if fingerprint not in seen:
-                            seen.add(fingerprint)
-                            unique_moves.append({'x': x, 'y': y, 'c': c})
-                except: continue
-
-        # 5. 生成 SGF
-        sgf = f"(;GM[1]SZ[19]AP[Txwq_Vuex_Hunter]DT[{datetime.date.today()}]"
-        count = 0
-        for m in unique_moves:
-            # 颜色：1=黑, 2=白
-            color = "B"
-            if m['c'] == 2: color = "W"
-            elif m['c'] == 1: color = "B"
-            elif m['c'] == 0: color = "B" # 默认黑
-            
-            sgf += f";{color}[{num_to_sgf(m['x'])}{num_to_sgf(m['y'])}]"
-            count += 1
-                
-        return sgf + ")", f"✅ 完美抓取！从 Vuex 仓库中提取了 {count} 手棋。"
-
+        resp = requests.post(url, data=data, timeout=10)
+        resp.raise_for_status()
+        js = resp.json()
+        if js.get("result") == 0:
+            return js.get("chess")
+        else:
+            st.error(f"API 报错: {js.get('resultstr')}")
+            return None
     except Exception as e:
-        return None, f"❌ 系统错误: {str(e)}"
-    finally:
-        if driver: driver.quit()
-            
+        st.error(f"连接失败: {e}")
+        return None
+
 # ===============================
 # 页面主逻辑
 # ===============================
@@ -515,39 +403,29 @@ with st.sidebar:
                 st.success(f"已保存：{p1} vs {p2}（胜者：{final_winner}）")
                 st.rerun()
     
-    st.divider()
+    st.divider()  # 加一条分割线
     
+    # 新增：腾讯围棋抓取小工具
     st.header("🛠 实用工具")
-    with st.expander("📡 腾讯围棋直播抓取 (终极版)", expanded=True):
-        st.caption("技术原理：基于内存雷达定位，直接提取 Vuex 全局状态。")
-        
-        cid = st.text_input("输入直播分享链接", placeholder="https://h5.txwq.qq.com/txwqshare/...")
-        
-        if st.button("开始抓取"):
+    with st.expander("📥 腾讯围棋棋谱抓取"):
+        st.caption("输入对局 ID 即可提取 SGF 文件")
+        cid = st.text_input("Chess ID", placeholder="如: 1770092663030101341")
+        if st.button("获取并准备下载"):
             if cid:
-                with st.spinner("正在直连内存仓库..."):
-                    result = fetch_txwq_websocket(cid.strip())
-                    
-                    if result:
-                        sgf_text, msg_or_debug = result
-                        
-                        if sgf_text: 
-                            st.success(msg_or_debug)
-                            fname = f"Live_Game_{datetime.datetime.now().strftime('%H%M')}.sgf"
-                            st.download_button("💾 下载 SGF", sgf_text, file_name=fname)
-                        
-                        elif isinstance(msg_or_debug, tuple):
-                            # 如果还是失败，显示截图帮助排查
-                            debug_text, img_b64 = msg_or_debug
-                            st.error(debug_text)
-                            if img_b64:
-                                import base64
-                                st.image(base64.b64decode(img_b64), caption="失败截图", use_container_width=True)
-                    else:
-                        st.error("未知错误。")
+                with st.spinner("抓取中..."):
+                    sgf_text = fetch_txwq_content(cid.strip())
+                    if sgf_text:
+                        st.success("抓取成功！")
+                        # 提供下载按钮
+                        st.download_button(
+                            label="💾 点击下载 SGF",
+                            data=sgf_text,
+                            file_name=f"TXWQ_{cid}.sgf",
+                            mime="text/plain"
+                        )
             else:
-                st.warning("请先输入链接。")
-                
+                st.warning("请输入有效 ID")
+
 # ========== 实时排行 & 多人 Elo 走势 ==========
 col_rank, col_trend = st.columns([1, 2])
 
