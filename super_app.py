@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import re
 import datetime
 import requests
 import pandas as pd
@@ -330,109 +331,91 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (返璞归真：精准拦截 Console) ---
+# --- 腾讯围棋抓取工具 (iPhone 游客伪装版) ---
 def fetch_txwq_websocket(input_str: str):
     """
-    回归最简单的逻辑：
-    用户在 Console 里看到了数据，我们就去 Console 里拿。
-    精准定位 console.warn 中的 roomDetail -> opList 结构。
+    基于用户截图 的最终修正：
+    1. 伪装 iPhone X：强行触发 "游客进入房间响应"。
+    2. 劫持 console.warn：数据就在那个黄色的 "roomDetail" 警告里。
     """
     input_str = input_str.strip()
     if "txwqshare" not in input_str and "h5.txwq.qq.com" not in input_str:
         return None, "⚠️ 请输入完整的直播分享链接。"
 
+    # 1. 关键：伪装成 iPhone，欺骗服务器你是手机游客
+    mobile_emulation = {
+        "deviceMetrics": { "width": 375, "height": 812, "pixelRatio": 3.0 },
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1"
+    }
+    
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    # 注入手机配置
+    chrome_options.add_experimental_option("mobileEmulation", mobile_emulation)
 
     driver = None
     try:
         driver = webdriver.Chrome(options=chrome_options)
 
-        # 👑 注入精准拦截脚本
-        # 我们不乱抓了，只抓你截图里的那种结构
+        # 2. 注入拦截脚本：只盯住你截图里的那个结构
         hijack_script = """
         window.__collected_moves = [];
         var originalWarn = console.warn;
-        var originalLog = console.log;
         
-        function extractFromOpList(list) {
-            if (!Array.isArray(list)) return;
-            list.forEach(op => {
-                // 截图显示：opType 203 的数据在 data 字段里
-                if (op.data && 'x' in op.data && 'y' in op.data) {
-                    window.__collected_moves.push(op.data);
-                }
-                // 截图显示：opType 600/603 可能包含 setPieceList (摆子)
-                else if (op.setPieceList && Array.isArray(op.setPieceList)) {
-                     op.setPieceList.forEach(p => window.__collected_moves.push(p));
-                }
-                // 截图显示：有些直接就是棋子
-                else if ('x' in op && 'y' in op) {
-                    window.__collected_moves.push(op);
-                }
-            });
-        }
-
         function scanArg(arg) {
             if (!arg || typeof arg !== 'object') return;
             
-            // 🎯 核心路径：对应你的截图 image_1a3c08.jpg
-            // 结构是 { result: 0, roomDetail: { opList: [...] } }
+            // 🎯 核心特征：对应截图 image_1a3c08.jpg
+            // 寻找包含 "roomDetail" 和 "opList" 的警告对象
             if (arg.roomDetail && arg.roomDetail.opList) {
-                extractFromOpList(arg.roomDetail.opList);
-            }
-            // 备用路径：万一它有时候不包在 roomDetail 里
-            else if (arg.opList) {
-                extractFromOpList(arg.opList);
-            }
-            // 备用路径：直播增量数据 (单颗棋子)
-            else if ('x' in arg && 'y' in arg && 'color' in arg) {
-                window.__collected_moves.push(arg);
-            }
-        }
-
-        function hijack(args) {
-            for (var i = 0; i < args.length; i++) {
-                scanArg(args[i]);
+                var list = arg.roomDetail.opList;
+                if (Array.isArray(list)) {
+                    list.forEach(op => {
+                        // 提取 opType: 203 的棋子数据 (在 data 字段里)
+                        if (op.data && 'x' in op.data && 'y' in op.data) {
+                            window.__collected_moves.push(op.data);
+                        }
+                        // 提取 opType: 600+ 的摆子数据 (在 setPieceList 里)
+                        else if (op.setPieceList && Array.isArray(op.setPieceList)) {
+                            op.setPieceList.forEach(p => window.__collected_moves.push(p));
+                        }
+                    });
+                }
             }
         }
 
-        // 重点监听 warn (历史大包在这里)，同时也监听 log
-        console.warn = function() { hijack(arguments); originalWarn.apply(console, arguments); };
-        console.log = function() { hijack(arguments); originalLog.apply(console, arguments); };
+        // 劫持 console.warn (黄色警告)
+        console.warn = function() { 
+            for (var i = 0; i < arguments.length; i++) scanArg(arguments[i]);
+            originalWarn.apply(console, arguments); 
+        };
         """
         driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': hijack_script})
 
-        st.toast("正在打开页面并等待历史数据加载...")
+        st.toast("正在以 iPhone 游客身份进入房间...")
         driver.get(input_str)
         
+        # 等待 12 秒，确保游客数据包加载完毕
         collected_data = []
-        
-        # 轮询 12 秒
-        # 只要那个黄色的警告在控制台一打印，我们瞬间就能拿到数据
         for i in range(12): 
             time.sleep(1)
             collected_data = driver.execute_script("return window.__collected_moves;")
-            
-            # 如果抓到了 >20 手，说明历史包 opList 解析成功
-            if collected_data and len(collected_data) > 20:
+            if collected_data and len(collected_data) > 10:
                 time.sleep(1) 
                 break
         
         if not collected_data:
-             return None, "❌ 未捕获数据。页面可能加载失败，或未触发 Console 打印。"
+             return None, "❌ 未捕获数据。可能服务器未响应'游客进入'请求，或页面加载受阻。"
 
-        # === 🧩 数据清洗与组装 ===
+        # === 3. 数据清洗 ===
         unique_moves = []
         seen = set()
         
-        # 截图里有 "step" 或 "checkSyn" 字段，可以用它排序
-        # 但通常 opList 本身就是有序的数组，我们直接按捕获顺序处理最稳妥
+        # 你的截图显示 opList 本身是有序的 (seq: 1, seq: 2...)
+        # 我们直接信任这个顺序
         
         for m in collected_data:
             try:
@@ -440,32 +423,27 @@ def fetch_txwq_websocket(input_str: str):
                 y = int(m['y'])
                 color_val = int(m['color'])
                 
-                # 指纹去重
                 fingerprint = f"{x},{y},{color_val}"
                 if fingerprint not in seen:
                     seen.add(fingerprint)
                     unique_moves.append(m)
             except: continue
 
-        # 如果有 step 字段，尝试排序一下更保险
-        if len(unique_moves) > 0 and 'step' in unique_moves[0]:
-             unique_moves.sort(key=lambda x: x.get('step', 0))
-
         # 生成 SGF
-        sgf = f"(;GM[1]SZ[19]AP[Txwq_Simple_Console]DT[{datetime.date.today()}]"
+        sgf = f"(;GM[1]SZ[19]AP[Txwq_iPhone_Guest]DT[{datetime.date.today()}]"
         count = 0
         for m in unique_moves:
-            # 颜色逻辑：截图 opType 203 data 里的 color:1 是黑，color:2 是白
+            # 颜色：截图显示 1=黑, 2=白
             c = "B"
             if m['color'] == 2: c = "W"
             elif m['color'] == 1: c = "B"
-            elif m['color'] == 0: c = "B" # 兼容旧版
+            elif m['color'] == 0: c = "B"
             
             if 0 <= m['x'] <= 18 and 0 <= m['y'] <= 18:
                 sgf += f";{c}[{num_to_sgf(m['x'])}{num_to_sgf(m['y'])}]"
                 count += 1
                 
-        return sgf + ")", f"✅ 抓取成功！精准提取历史记录共 {count} 手。"
+        return sgf + ")", f"✅ 抓取成功！作为 iPhone 游客提取了 {count} 手历史棋谱。"
 
     except Exception as e:
         return None, f"❌ 运行异常: {str(e)}"
@@ -542,14 +520,14 @@ with st.sidebar:
     st.divider()
     
     st.header("🛠 实用工具")
-    with st.expander("📡 腾讯围棋直播抓取 (终极版)", expanded=True):
-        st.caption("技术原理：劫持 Console (含 Warn) + opList 定向解析。")
+    with st.expander("📡 腾讯围棋直播抓取 (iPhone版)", expanded=True):
+        st.caption("技术原理：模拟 iPhone 触发游客数据响应，精准提取 opList。")
         
         cid = st.text_input("输入直播分享链接", placeholder="https://h5.txwq.qq.com/txwqshare/...")
         
         if st.button("开始抓取"):
             if cid:
-                with st.spinner("正在启动云端浏览器并收集全量棋谱..."):
+                with st.spinner("正在启动 iPhone 模拟器..."):
                     sgf_text, status_msg = fetch_txwq_websocket(cid.strip())
                     
                     if sgf_text:
