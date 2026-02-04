@@ -3,8 +3,10 @@ import json
 import time
 import datetime
 import requests
-from urllib.parse import urlparse, parse_qs
+import pandas as pd  # 👈 补全了，修复 NameError
+import altair as alt # 👈 补全了
 import streamlit as st
+from urllib.parse import urlparse, parse_qs
 
 # Selenium 核心库
 from selenium import webdriver
@@ -418,8 +420,8 @@ def fetch_txwq_websocket(input_str: str):
             try:
                 # 腾讯格式通常是: [颜色(0黑1白), 手数, X, Y, ...]
                 c = "B" if move[0] == 0 else "W"
-                x, y = int(move[2]), int(move[3]) # 注意：有时候下标是 2和3，有时候是 -2和-1，视版本而定，这里取通用逻辑
-                # 保险起见，尝试适配两种格式
+                x, y = int(move[2]), int(move[3]) 
+                # 兼容不同版本坐标位置
                 if x > 18: x = int(move[-2])
                 if y > 18: y = int(move[-1])
                 
