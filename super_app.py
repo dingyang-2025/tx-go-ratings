@@ -1,8 +1,6 @@
 import os
 import json
 import time
-import re
-import base64 # 新增：用于处理截图
 import datetime
 import requests
 import pandas as pd
@@ -332,19 +330,19 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (Vue 内存直接提取版) ---
+# --- 腾讯围棋抓取工具 (Vuex 定点爆破版) ---
 def fetch_txwq_websocket(input_str: str):
     """
-    必杀技思路：
-    既然截图能显示棋盘，说明数据一定在 JS 内存里。
-    直接遍历网页的 Vue 实例，寻找包含棋子坐标的数组。
-    不再依赖 console 日志或网络抓包。
+    终极思路：
+    基于用户雷达扫描结果。
+    数据精确位置：document.getElementById('app').__vue__.$store.state.chess_data
+    直接读取该变量，解析 SGF。
     """
     input_str = input_str.strip()
     if "txwqshare" not in input_str and "h5.txwq.qq.com" not in input_str:
         return None, "⚠️ 请输入完整的直播分享链接。"
 
-    # 1. 强力反爬配置 (保持不变，因为证明有效)
+    # 1. 强力反爬 + 手机伪装 (保持不变，确保页面正常加载)
     mobile_emulation = {
         "deviceMetrics": { "width": 375, "height": 812, "pixelRatio": 3.0 },
         "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1"
@@ -369,129 +367,81 @@ def fetch_txwq_websocket(input_str: str):
             "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         })
 
-        st.toast("正在加载棋盘内存...")
+        st.toast("正在启动...")
         driver.get(input_str)
         
-        # 2. 等待棋盘渲染 (截图显示棋盘已经出来了)
-        time.sleep(8)
+        # 2. 等待数据加载
+        # 既然数据在 Vuex 里，我们只需要等页面渲染出棋盘，数据自然就准备好了
+        time.sleep(10)
         
-        # 3. 👑 注入“探囊取物”脚本：直接搜刮 Vue 实例
-        # 这段 JS 会遍历页面上的所有 Vue 组件，找到那个存着棋谱的数组
+        # 3. 👑 定点爆破：直接提取 image_1b82a0.png 里的路径
         extraction_script = """
-        function findChessData() {
-            // 辅助：判断一个对象像不像棋子
-            function isMove(obj) {
-                return obj && typeof obj === 'object' &&
-                       'x' in obj && typeof obj.x === 'number' &&
-                       'y' in obj && typeof obj.y === 'number' &&
-                       'color' in obj;
+        try {
+            var app = document.getElementById('app');
+            if (app && app.__vue__ && app.__vue__.$store && app.__vue__.$store.state) {
+                // 这就是你截图里找到的宝藏
+                return app.__vue__.$store.state.chess_data;
             }
-
-            // 辅助：判断一个数组像不像棋谱
-            function isMoveList(arr) {
-                if (!Array.isArray(arr) || arr.length < 5) return false;
-                var validCount = 0;
-                // 抽查前10个
-                for (var i = 0; i < Math.min(arr.length, 10); i++) {
-                    if (isMove(arr[i]) || (arr[i] && isMove(arr[i].data))) validCount++;
-                }
-                return validCount >= 3;
-            }
-
-            // 1. 深度优先搜索 Vue 树
-            var queue = [];
-            
-            // 找到根节点
-            var root = document.getElementById('app') || document.body;
-            
-            // 尝试获取根 Vue 实例
-            if (root.__vue__) queue.push(root.__vue__);
-            else {
-                // 暴力遍历所有 DOM 找 Vue 实例
-                var all = document.querySelectorAll('*');
-                for (var i = 0; i < all.length; i++) {
-                    if (all[i].__vue__) queue.push(all[i].__vue__);
-                }
-            }
-
-            var visited = new Set();
-            var candidates = [];
-
-            while (queue.length > 0) {
-                var vm = queue.shift();
-                if (visited.has(vm)) continue;
-                visited.add(vm);
-
-                // 搜查 data
-                try {
-                    if (vm.$data) {
-                        for (var key in vm.$data) {
-                            var val = vm.$data[key];
-                            // 检查是不是棋谱数组
-                            if (isMoveList(val)) return val; 
-                            // 检查是不是包含 opList 的大对象
-                            if (val && val.opList && isMoveList(val.opList)) return val.opList;
-                            if (val && val.roomDetail && val.roomDetail.opList) return val.roomDetail.opList;
-                        }
-                    }
-                } catch(e) {}
-
-                // 继续搜子组件
-                if (vm.$children) {
-                    vm.$children.forEach(child => queue.push(child));
-                }
-            }
-            return null;
-        }
-        return findChessData();
+        } catch(e) { return null; }
+        return null;
         """
         
         memory_data = driver.execute_script(extraction_script)
         
         if not memory_data:
-            # 再次尝试截图诊断，看看是不是变了
+            # 万一提取失败，截图看看是不是白屏了
             screenshot = driver.get_screenshot_as_base64()
-            return None, (f"❌ 内存提取失败。虽然棋盘已渲染，但未找到符合特征的数据结构。\n可能是腾讯使用了非 Vue 框架 (React?) 或变量名混淆。", screenshot)
+            return None, (f"❌ 提取失败。虽然路径已确认，但脚本返回了空值。\n可能是页面未加载完成。", screenshot)
 
-        st.toast(f"🎉 内存提取成功！获取到 {len(memory_data)} 条原始数据。")
+        st.toast(f"🎉 成功锁定内存！获取到 {len(memory_data)} 手数据。")
 
-        # 4. 数据清洗
+        # === 4. 数据清洗与组装 ===
         unique_moves = []
         seen = set()
         
-        # 内存里的数据通常已经是 Object 了，不需要正则，直接读
+        # 遍历数组，提取坐标
         for item in memory_data:
             m = None
-            # 情况A: item 就是棋子 {x:1, y:2, color:1}
+            # 兼容多种可能的数据结构
+            # 情况A: 直接是 {x:1, y:2, color:1}
             if 'x' in item and 'y' in item and 'color' in item:
                 m = item
-            # 情况B: item 是操作对象 {opType:203, data: {x:1...}}
-            elif 'data' in item and 'x' in item['data']:
+            # 情况B: 嵌套在 data 里 {data: {x:1...}}
+            elif 'data' in item and item['data'] and 'x' in item['data']:
                 m = item['data']
+            # 情况C: 腾讯特有的 Protobuf 解码后结构
+            elif 'x' in item and 'y' in item: # 有些步骤可能没有 color (如 pass)
+                 m = item
             
             if m:
                 try:
-                    x, y, c = int(m['x']), int(m['y']), int(m['color'])
-                    fingerprint = f"{x},{y},{c}"
-                    if fingerprint not in seen:
-                        seen.add(fingerprint)
-                        unique_moves.append({'x': x, 'y': y, 'c': c})
+                    x = int(m['x'])
+                    y = int(m['y'])
+                    # 颜色处理：有时候 color 也是 float，强制转 int
+                    c = int(m.get('color', 0)) 
+                    
+                    # 过滤无效坐标 (腾讯有时候会发 -1 或 19 表示停着/虚手)
+                    if 0 <= x <= 18 and 0 <= y <= 18:
+                        fingerprint = f"{x},{y},{c}"
+                        if fingerprint not in seen:
+                            seen.add(fingerprint)
+                            unique_moves.append({'x': x, 'y': y, 'c': c})
                 except: continue
 
         # 5. 生成 SGF
-        sgf = f"(;GM[1]SZ[19]AP[Txwq_Vue_Heist]DT[{datetime.date.today()}]"
+        sgf = f"(;GM[1]SZ[19]AP[Txwq_Vuex_Hunter]DT[{datetime.date.today()}]"
         count = 0
         for m in unique_moves:
+            # 颜色：1=黑, 2=白
             color = "B"
             if m['c'] == 2: color = "W"
             elif m['c'] == 1: color = "B"
-            elif m['c'] == 0: color = "B"
+            elif m['c'] == 0: color = "B" # 默认黑
             
-            if 0 <= m['x'] <= 18 and 0 <= m['y'] <= 18:
-                sgf += f";{color}[{num_to_sgf(m['x'])}{num_to_sgf(m['y'])}]"
-                count += 1
+            sgf += f";{color}[{num_to_sgf(m['x'])}{num_to_sgf(m['y'])}]"
+            count += 1
                 
-        return sgf + ")", f"✅ 成功！从页面内存中直接提取了 {count} 手棋。"
+        return sgf + ")", f"✅ 完美抓取！从 Vuex 仓库中提取了 {count} 手棋。"
 
     except Exception as e:
         return None, f"❌ 系统错误: {str(e)}"
@@ -568,32 +518,31 @@ with st.sidebar:
     st.divider()
     
     st.header("🛠 实用工具")
-    with st.expander("📡 腾讯围棋直播抓取 (诊断版)", expanded=True):
-        st.caption("增强反爬策略，失败时提供网页截图诊断。")
+    with st.expander("📡 腾讯围棋直播抓取 (终极版)", expanded=True):
+        st.caption("技术原理：基于内存雷达定位，直接提取 Vuex 全局状态。")
         
         cid = st.text_input("输入直播分享链接", placeholder="https://h5.txwq.qq.com/txwqshare/...")
         
         if st.button("开始抓取"):
             if cid:
-                with st.spinner("正在执行隐秘抓取..."):
+                with st.spinner("正在直连内存仓库..."):
                     result = fetch_txwq_websocket(cid.strip())
                     
                     if result:
                         sgf_text, msg_or_debug = result
                         
-                        # 成功的情况
                         if sgf_text: 
                             st.success(msg_or_debug)
                             fname = f"Live_Game_{datetime.datetime.now().strftime('%H%M')}.sgf"
                             st.download_button("💾 下载 SGF", sgf_text, file_name=fname)
                         
-                        # 失败的情况 (返回了元组: (调试信息, 截图Base64))
                         elif isinstance(msg_or_debug, tuple):
+                            # 如果还是失败，显示截图帮助排查
                             debug_text, img_b64 = msg_or_debug
-                            st.error("未找到棋谱数据，启动视觉诊断：")
-                            st.markdown(debug_text)
+                            st.error(debug_text)
                             if img_b64:
-                                st.image(base64.b64decode(img_b64), caption="浏览器实际看到的画面", use_container_width=True)
+                                import base64
+                                st.image(base64.b64decode(img_b64), caption="失败截图", use_container_width=True)
                     else:
                         st.error("未知错误。")
             else:
