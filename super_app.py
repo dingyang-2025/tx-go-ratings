@@ -330,12 +330,12 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (终极完结：历史+直播全收录) ---
+# --- 腾讯围棋抓取工具 (双管齐下：控制台窃听 + 内存暴力搜查) ---
 def fetch_txwq_websocket(input_str: str):
     """
-    终极修正版：
-    1. 移除 checkSyn 强制检查，确保抓到历史棋谱列表。
-    2. 使用指纹去重逻辑，防止历史数据与直播数据重复。
+    终极融合版：
+    1. 方案A (窃听): 劫持 console.log 获取实时更新的棋子。
+    2. 方案B (搜身): 深度扫描 window 和 Vue 实例，挖掘已加载的历史棋谱。
     """
     input_str = input_str.strip()
     full_share_url = input_str
@@ -355,116 +355,157 @@ def fetch_txwq_websocket(input_str: str):
     try:
         driver = webdriver.Chrome(options=chrome_options)
 
-        # 👑 注入“宽容版”收集器
-        # 核心改动：删除了对 checkSyn 的强制要求，只要有 x,y,color 就抓！
+        # 👑 1. 注入“窃听器” (Plan A)
         hijack_script = """
         window.__collected_moves = [];
         var originalLog = console.log;
-        var originalInfo = console.info;
         
+        // 实时拦截
         function scanArg(arg) {
             if (arg && typeof arg === 'object') {
-                // 🎯 只要有 x, y, color 就抓！这是为了兼容历史记录包
                 if ('x' in arg && 'y' in arg && 'color' in arg) {
                     window.__collected_moves.push(arg);
                 }
-                // 兼容嵌套情况 (有时候棋子包在 chessData 里)
-                else if (arg.chessData && 'x' in arg.chessData) {
-                     window.__collected_moves.push(arg.chessData);
-                }
-                // 递归：历史棋谱通常是一个大数组，必须钻进去找
-                else if (Array.isArray(arg)) {
-                    arg.forEach(item => scanArg(item));
-                }
-                // 字典遍历：防止藏在 list 字段里
-                else if (arg.list && Array.isArray(arg.list)) {
-                    arg.list.forEach(item => scanArg(item));
-                }
+                else if (arg.chessData) scanArg(arg.chessData);
+                else if (Array.isArray(arg)) arg.forEach(item => scanArg(item));
             }
         }
-
-        function hijack(args) {
-            for (var i = 0; i < args.length; i++) {
-                scanArg(args[i]);
+        console.log = function() { scanArg(arguments[0]); originalLog.apply(console, arguments); };
+        
+        // 👑 2. 注入“内存搜查令” (Plan B)
+        // 主动遍历内存，寻找历史棋谱数组
+        window.__memory_scan_result = [];
+        window.scanMemoryForHistory = function() {
+            var foundMoves = [];
+            var seen = new Set();
+            
+            function isMove(obj) {
+                return obj && typeof obj === 'object' && 
+                       'x' in obj && typeof obj.x === 'number' &&
+                       'y' in obj && typeof obj.y === 'number' &&
+                       'color' in obj;
             }
-        }
 
-        console.log = function() { hijack(arguments); originalLog.apply(console, arguments); };
-        console.info = function() { hijack(arguments); originalInfo.apply(console, arguments); };
+            function deepSearch(obj, depth) {
+                if (depth > 6) return; // 控制搜索深度防止卡死
+                if (!obj || typeof obj !== 'object') return;
+                if (seen.has(obj)) return;
+                seen.add(obj);
+
+                // 特征识别：如果这是一个数组，且里面装着棋子
+                if (Array.isArray(obj) && obj.length > 5) {
+                    // 抽查前几个元素，看是否像棋子
+                    var validCount = 0;
+                    for(var i=0; i<Math.min(obj.length, 5); i++) {
+                        if (isMove(obj[i])) validCount++;
+                    }
+                    if (validCount >= 3) {
+                        // 找到了！这就是历史棋谱数组！
+                        obj.forEach(m => foundMoves.push(m));
+                        return;
+                    }
+                }
+
+                // 递归搜索 (优先搜索 Vue 的 data)
+                try {
+                    for (var key in obj) {
+                        // 跳过一些巨大的无关对象
+                        if (key === 'webpackJsonp' || key === 'document') continue; 
+                        deepSearch(obj[key], depth + 1);
+                        if (foundMoves.length > 0) return; // 找到一组就收工
+                    }
+                } catch(e) {}
+            }
+
+            // 从 Vue 的根节点开始搜 (效率最高)
+            var vueRoot = document.getElementById('app') ? document.getElementById('app').__vue__ : null;
+            if (vueRoot) {
+                deepSearch(vueRoot.$data, 0);
+                if (foundMoves.length === 0) deepSearch(vueRoot.$store, 0);
+            }
+            
+            // 如果 Vue 搜不到，就去 window 全局变量里碰运气
+            if (foundMoves.length === 0) deepSearch(window, 0);
+            
+            window.__memory_scan_result = foundMoves;
+        }
         """
         driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': hijack_script})
 
-        st.toast("正在潜入控制台，全量收集棋谱...")
+        st.toast("正在潜入直播间...")
         driver.get(full_share_url)
+        time.sleep(5) # 等待页面加载
         
-        collected_data = []
+        # === 第一阶段：检查窃听结果 ===
+        collected_data = driver.execute_script("return window.__collected_moves;")
         
-        # 轮询 15 秒，给历史数据加载留足时间
-        for i in range(15): 
-            time.sleep(1)
-            collected_data = driver.execute_script("return window.__collected_moves;")
+        # === 第二阶段：如果没抓到或者抓得太少，启动内存搜查 ===
+        if not collected_data or len(collected_data) < 10:
+            st.toast("控制台安静，正在执行内存深度搜查 (寻找历史棋谱)...")
+            driver.execute_script("window.scanMemoryForHistory();")
+            time.sleep(2) # 给搜索一点时间
+            memory_data = driver.execute_script("return window.__memory_scan_result;")
             
-            # 如果抓到了 >10 手棋，且数量稳定了，就说明历史记录抓完了
-            if collected_data and len(collected_data) > 10:
-                time.sleep(1) # 防抖
-                break
+            if memory_data:
+                st.toast(f"🎉 内存搜查成功！挖出 {len(memory_data)} 手历史棋谱！")
+                collected_data.extend(memory_data)
         
         if not collected_data:
-             return None, "❌ 监听超时。控制台未打印任何包含 {x,y,color} 的对象。可能是页面加载失败。"
+             return None, "❌ 抓取失败。控制台无日志，内存扫描也未发现棋谱特征。"
 
-        # === 🧩 智能拼图逻辑 ===
-        
-        # 1. 简单去重 (利用 "x,y,color" 作为指纹)
-        # 为什么要去重？因为历史记录列表里可能有 1-100手，而单独的直播包里可能又发了一次 100手。
+        # === 🧩 智能拼图与去重 ===
         unique_moves = []
         seen_fingerprints = set()
         
-        # 浏览器控制台通常是按时间顺序打印的：先打历史记录(1-100)，再打直播更新(101...)
-        # 所以我们直接按收集到的顺序处理即可
+        # 排序策略：
+        # 1. 优先按 checkSyn (序列号) 排序
+        # 2. 如果没有 checkSyn，则保持原有的数组顺序 (历史记录通常本身就是有序的)
         
-        for m in collected_data:
+        # 分离
+        moves_with_seq = [m for m in collected_data if 'checkSyn' in m]
+        moves_no_seq = [m for m in collected_data if 'checkSyn' not in m]
+        
+        # 排序有序号的
+        moves_with_seq.sort(key=lambda x: x['checkSyn'])
+        
+        # 合并：通常无序号的历史在前，有序号的直播在后
+        all_candidates = moves_no_seq + moves_with_seq
+        
+        for m in all_candidates:
             try:
+                # 强转 int 清洗数据
                 x = int(m['x'])
                 y = int(m['y'])
                 c = int(m['color'])
                 
-                # 指纹：x,y,color
+                # 去重指纹
                 fingerprint = f"{x},{y},{c}"
-                
                 if fingerprint not in seen_fingerprints:
                     seen_fingerprints.add(fingerprint)
                     unique_moves.append(m)
             except: continue
-            
-        # 2. 如果数据量太少，可能是抓取出错
-        if len(unique_moves) < 5:
-            st.warning(f"⚠️ 仅捕获 {len(unique_moves)} 手棋，可能数据加载不全。")
 
-        # 3. 组装 SGF
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Full_Collector]DT[{datetime.date.today()}]"
+        # 组装 SGF
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Memory_Hunter]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         
         for move in unique_moves:
             try:
-                x = int(move['x'])
-                y = int(move['y'])
-                color_val = int(move['color'])
+                x, y, color_val = int(move['x']), int(move['y']), int(move['color'])
                 
-                # 颜色映射：根据你的截图 Packet1(color:1) Packet2(color:2)
-                # 且 Packet1是107手(黑), Packet2是108手(白) -> 1=黑, 2=白
+                # 颜色映射
                 c = "B"
                 if color_val == 2: c = "W"
                 elif color_val == 1: c = "B"
-                elif color_val == 0: c = "B" # 兼容旧格式
+                elif color_val == 0: c = "B"
                 
                 if 0 <= x <= 18 and 0 <= y <= 18:
                     sgf_moves += f";{c}[{num_to_sgf(x)}{num_to_sgf(y)}]"
                     move_count += 1
             except: continue
 
-        status_msg = f"✅ 大获全胜！共提取 {move_count} 手棋（含历史记录）。"
-        return sgf_header + sgf_moves + ")", status_msg
+        return sgf_header + sgf_moves + ")", f"✅ 抓取成功！历史+直播共提取 {move_count} 手。"
 
     except Exception as e:
         return None, f"❌ 运行异常: {str(e)}"
