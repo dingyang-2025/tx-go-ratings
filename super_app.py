@@ -2,6 +2,7 @@ import os
 import json
 import time
 import re
+import base64 # 新增：用于处理截图
 import datetime
 import requests
 import pandas as pd
@@ -331,18 +332,19 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (iPhone 游客伪装版) ---
+# --- 腾讯围棋抓取工具 (反爬增强 + 截图诊断版) ---
 def fetch_txwq_websocket(input_str: str):
     """
-    基于用户截图 的最终修正：
-    1. 伪装 iPhone X：强行触发 "游客进入房间响应"。
-    2. 劫持 console.warn：数据就在那个黄色的 "roomDetail" 警告里。
+    诊断版思路：
+    1. 强力反爬配置 (移除自动化标记)。
+    2. 手机模式伪装。
+    3. 如果抓不到数据，直接截图网页内容，让用户看到浏览器到底卡在哪。
     """
     input_str = input_str.strip()
     if "txwqshare" not in input_str and "h5.txwq.qq.com" not in input_str:
         return None, "⚠️ 请输入完整的直播分享链接。"
 
-    # 1. 关键：伪装成 iPhone，欺骗服务器你是手机游客
+    # 1. 强力反爬配置
     mobile_emulation = {
         "deviceMetrics": { "width": 375, "height": 812, "pixelRatio": 3.0 },
         "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1"
@@ -353,100 +355,113 @@ def fetch_txwq_websocket(input_str: str):
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    # 注入手机配置
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled") # 👈 关键：隐藏自动化特征
     chrome_options.add_experimental_option("mobileEmulation", mobile_emulation)
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
 
     driver = None
     try:
         driver = webdriver.Chrome(options=chrome_options)
-
-        # 2. 注入拦截脚本：只盯住你截图里的那个结构
-        hijack_script = """
-        window.__collected_moves = [];
-        var originalWarn = console.warn;
         
-        function scanArg(arg) {
-            if (!arg || typeof arg !== 'object') return;
-            
-            // 🎯 核心特征：对应截图 image_1a3c08.jpg
-            // 寻找包含 "roomDetail" 和 "opList" 的警告对象
-            if (arg.roomDetail && arg.roomDetail.opList) {
-                var list = arg.roomDetail.opList;
-                if (Array.isArray(list)) {
-                    list.forEach(op => {
-                        // 提取 opType: 203 的棋子数据 (在 data 字段里)
-                        if (op.data && 'x' in op.data && 'y' in op.data) {
-                            window.__collected_moves.push(op.data);
-                        }
-                        // 提取 opType: 600+ 的摆子数据 (在 setPieceList 里)
-                        else if (op.setPieceList && Array.isArray(op.setPieceList)) {
-                            op.setPieceList.forEach(p => window.__collected_moves.push(p));
-                        }
-                    });
-                }
-            }
-        }
+        # 再次执行 CDP 命令来隐藏 webdriver 属性
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            """
+        })
 
-        // 劫持 console.warn (黄色警告)
-        console.warn = function() { 
-            for (var i = 0; i < arguments.length; i++) scanArg(arguments[i]);
-            originalWarn.apply(console, arguments); 
-        };
+        # 2. 注入“暴力录音”脚本 (不筛选，全录)
+        hijack_script = """
+        window.__log_dump = [];
+        function record(args) {
+            try {
+                var entry = [];
+                for (var i = 0; i < args.length; i++) {
+                    // 尝试转 JSON，转不了就强转 String
+                    try { entry.push(JSON.stringify(args[i])); } 
+                    catch(e) { entry.push(String(args[i])); }
+                }
+                window.__log_dump.push(entry.join(" "));
+            } catch (e) {}
+        }
+        console.warn = function() { record(arguments); };
+        console.log = function() { record(arguments); };
         """
         driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': hijack_script})
 
-        st.toast("正在以 iPhone 游客身份进入房间...")
+        st.toast("正在潜入... (已启用强力反爬)")
         driver.get(input_str)
         
-        # 等待 12 秒，确保游客数据包加载完毕
-        collected_data = []
-        for i in range(12): 
-            time.sleep(1)
-            collected_data = driver.execute_script("return window.__collected_moves;")
-            if collected_data and len(collected_data) > 10:
-                time.sleep(1) 
-                break
+        # 等待数据加载
+        time.sleep(10)
         
-        if not collected_data:
-             return None, "❌ 未捕获数据。可能服务器未响应'游客进入'请求，或页面加载受阻。"
+        # 3. 提取数据
+        logs = driver.execute_script("return window.__log_dump;")
+        
+        # === 4. 暴力正则匹配 ===
+        found_moves = []
+        if logs:
+            full_text = " ".join(logs)
+            # 你的截图显示： "x":16, "y":3, "color":1
+            # 我们用正则直接在文本里搜
+            pattern = re.compile(r'"x":(\d+)\s*,\s*"y":(\d+)\s*,\s*"color":(\d+)', re.IGNORECASE)
+            matches = pattern.findall(full_text)
+            
+            # 尝试另一种顺序 (color在前)
+            pattern2 = re.compile(r'"color":(\d+)\s*,\s*"x":(\d+)\s*,\s*"y":(\d+)', re.IGNORECASE)
+            matches2 = pattern2.findall(full_text)
+            
+            for m in matches: found_moves.append({'x': int(m[0]), 'y': int(m[1]), 'c': int(m[2])})
+            for m in matches2: found_moves.append({'x': int(m[1]), 'y': int(m[2]), 'c': int(m[0])})
 
-        # === 3. 数据清洗 ===
+        # === 5. 失败时的诊断 (关键！) ===
+        if not found_moves:
+            # 📸 截图看看到底发生了什么
+            screenshot = driver.get_screenshot_as_base64()
+            page_title = driver.title
+            page_source_preview = driver.page_source[:500] # 看前500个字符
+            
+            debug_info = f"""
+            ❌ **抓取失败诊断报告**
+            
+            1. **页面标题**: {page_title}
+            2. **捕获日志数**: {len(logs) if logs else 0} 条
+            3. **页面截图**: (见下方)
+            
+            **可能原因分析**:
+            * 如果截图是**白屏**: 网络超时或加载失败。
+            * 如果截图是**下载页/App推荐**: 手机模拟未生效，被重定向了。
+            * 如果截图是**棋盘**但没数据: 数据在内存里，但 Console 没打印 (我们需要换 Vue 内存提取法)。
+            """
+            return None, (debug_info, screenshot)
+
+        # 6. 成功时的组装
         unique_moves = []
         seen = set()
-        
-        # 你的截图显示 opList 本身是有序的 (seq: 1, seq: 2...)
-        # 我们直接信任这个顺序
-        
-        for m in collected_data:
-            try:
-                x = int(m['x'])
-                y = int(m['y'])
-                color_val = int(m['color'])
-                
-                fingerprint = f"{x},{y},{color_val}"
-                if fingerprint not in seen:
-                    seen.add(fingerprint)
-                    unique_moves.append(m)
-            except: continue
+        for m in found_moves:
+            fingerprint = f"{m['x']},{m['y']},{m['c']}"
+            if fingerprint not in seen:
+                seen.add(fingerprint)
+                unique_moves.append(m)
 
-        # 生成 SGF
-        sgf = f"(;GM[1]SZ[19]AP[Txwq_iPhone_Guest]DT[{datetime.date.today()}]"
+        sgf = f"(;GM[1]SZ[19]AP[Txwq_AntiBot]DT[{datetime.date.today()}]"
         count = 0
         for m in unique_moves:
-            # 颜色：截图显示 1=黑, 2=白
-            c = "B"
-            if m['color'] == 2: c = "W"
-            elif m['color'] == 1: c = "B"
-            elif m['color'] == 0: c = "B"
-            
+            color = "B"
+            if m['c'] == 2: color = "W"
+            elif m['c'] == 1: color = "B"
+            elif m['c'] == 0: color = "B"
             if 0 <= m['x'] <= 18 and 0 <= m['y'] <= 18:
-                sgf += f";{c}[{num_to_sgf(m['x'])}{num_to_sgf(m['y'])}]"
+                sgf += f";{color}[{num_to_sgf(m['x'])}{num_to_sgf(m['y'])}]"
                 count += 1
                 
-        return sgf + ")", f"✅ 抓取成功！作为 iPhone 游客提取了 {count} 手历史棋谱。"
+        return sgf + ")", f"✅ 成功！提取了 {count} 手棋。"
 
     except Exception as e:
-        return None, f"❌ 运行异常: {str(e)}"
+        return None, f"❌ 系统错误: {str(e)}"
     finally:
         if driver: driver.quit()
             
@@ -520,27 +535,34 @@ with st.sidebar:
     st.divider()
     
     st.header("🛠 实用工具")
-    with st.expander("📡 腾讯围棋直播抓取 (iPhone版)", expanded=True):
-        st.caption("技术原理：模拟 iPhone 触发游客数据响应，精准提取 opList。")
+    with st.expander("📡 腾讯围棋直播抓取 (诊断版)", expanded=True):
+        st.caption("增强反爬策略，失败时提供网页截图诊断。")
         
         cid = st.text_input("输入直播分享链接", placeholder="https://h5.txwq.qq.com/txwqshare/...")
         
         if st.button("开始抓取"):
             if cid:
-                with st.spinner("正在启动 iPhone 模拟器..."):
-                    sgf_text, status_msg = fetch_txwq_websocket(cid.strip())
+                with st.spinner("正在执行隐秘抓取..."):
+                    result = fetch_txwq_websocket(cid.strip())
                     
-                    if sgf_text:
-                        st.success(status_msg)
-                        fname = f"Live_Game_{datetime.datetime.now().strftime('%H%M')}.sgf"
-                        st.download_button(
-                            label="💾 下载 SGF 棋谱",
-                            data=sgf_text,
-                            file_name=fname,
-                            mime="application/x-go-sgf"
-                        )
+                    if result:
+                        sgf_text, msg_or_debug = result
+                        
+                        # 成功的情况
+                        if sgf_text: 
+                            st.success(msg_or_debug)
+                            fname = f"Live_Game_{datetime.datetime.now().strftime('%H%M')}.sgf"
+                            st.download_button("💾 下载 SGF", sgf_text, file_name=fname)
+                        
+                        # 失败的情况 (返回了元组: (调试信息, 截图Base64))
+                        elif isinstance(msg_or_debug, tuple):
+                            debug_text, img_b64 = msg_or_debug
+                            st.error("未找到棋谱数据，启动视觉诊断：")
+                            st.markdown(debug_text)
+                            if img_b64:
+                                st.image(base64.b64decode(img_b64), caption="浏览器实际看到的画面", use_container_width=True)
                     else:
-                        st.error(status_msg)
+                        st.error("未知错误。")
             else:
                 st.warning("请先输入链接。")
                 
