@@ -332,37 +332,38 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (Base64 解码透视版) ---
-def find_moves_recursively(obj):
-    """递归搜索棋谱坐标"""
+# --- 腾讯围棋抓取工具 (终极修正：精准窃听版) ---
+def find_moves_in_dict(obj):
+    """
+    在截获的 chessData 对象中，自动寻找最像棋谱的数组
+    """
     if isinstance(obj, list):
-        if len(obj) > 10 and isinstance(obj[0], list) and len(obj[0]) >= 4:
+        # 特征：列表长度>10，且第一个元素也是列表 [x, y, z]
+        if len(obj) > 10 and isinstance(obj[0], list) and len(obj[0]) >= 3:
+            # 验证元素是否为数字
             try:
-                if isinstance(obj[0][2], (int, float)): return obj
+                if isinstance(obj[0][0], (int, float)): return obj
             except: pass
         for item in obj:
-            res = find_moves_recursively(item)
+            res = find_moves_in_dict(item)
             if res: return res
     elif isinstance(obj, dict):
         for value in obj.values():
-            res = find_moves_recursively(value)
+            res = find_moves_in_dict(value)
             if res: return res
     return None
 
 def fetch_txwq_websocket(input_str: str):
     """
-    Websocket 全量捕获 + Base64 解码 + Zlib 解压
+    利用 Protobuf 解密后的 Console Log 进行截获 (自动过滤 undefined 包)
     """
     input_str = input_str.strip()
-    is_live_link = False
     full_share_url = input_str
     if "txwqshare" in input_str or "h5.txwq.qq.com" in input_str:
-        is_live_link = True
-        
-    if not is_live_link:
+        pass
+    else:
         return None, "⚠️ 请输入完整的直播分享链接。"
 
-    # 配置 Chrome
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
@@ -370,85 +371,93 @@ def fetch_txwq_websocket(input_str: str):
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    chrome_options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
     driver = None
-    decoded_samples = [] # 用于调试：存储解码后的片段
-
     try:
         driver = webdriver.Chrome(options=chrome_options)
-        st.toast("正在接入直播流，准备解码...")
-        driver.get(full_share_url)
-        time.sleep(8) 
 
-        logs = driver.get_log("performance")
-        raw_moves = None
+        # 👑 核心：注入“挑食”的窃听代码
+        hijack_script = """
+        window.__captured_chess_data = []; // 用数组存，防止漏掉
         
-        for entry in logs:
-            try:
-                log_msg = json.loads(entry["message"])["message"]
-                if log_msg["method"] == "Network.webSocketFrameReceived":
-                    payload = log_msg["params"]["response"]["payloadData"]
-                    
-                    # 1. 尝试 Base64 解码
-                    try:
-                        # 有些包可能带有数字前缀 "42xxx"，尝试清洗
-                        clean_payload = payload
-                        if len(payload) > 50 and not payload.startswith("{"):
-                             # 纯乱码通常是 Base64
-                             binary_data = base64.b64decode(clean_payload)
-                        else:
-                             # 看起来像明文的，跳过解码
-                             binary_data = payload.encode('utf-8')
-                        
-                        # 2. 尝试 Zlib 解压 (这是腾讯常用的手段)
-                        try:
-                            binary_data = zlib.decompress(binary_data)
-                        except: pass # 不是压缩包，直接用
-                        
-                        # 3. 尝试把二进制转回字符串，看看是不是 JSON
-                        decoded_text = binary_data.decode('utf-8', errors='ignore')
-                        
-                        # 存一点样本给前台看，方便调试
-                        if len(decoded_text) > 20:
-                            decoded_samples.append(decoded_text[:100])
+        var originalLog = console.log;
+        var originalInfo = console.info;
+        
+        function checkAndCapture(args) {
+            for (var i = 0; i < args.length; i++) {
+                var arg = args[i];
+                if (arg && typeof arg === 'object') {
+                    // 🛡️ 过滤器：只有当 chessData 存在且不是 undefined 时才抓！
+                    // 这完美避开了你发现的 type: 402 空包
+                    if (arg.chessData !== undefined && arg.chessData !== null) {
+                        window.__captured_chess_data.push(arg.chessData);
+                    }
+                    // 双保险：有时候它直接把数据叫 moves 或 subChunks
+                    else if (arg.moves || arg.subChunks) {
+                         window.__captured_chess_data.push(arg);
+                    }
+                }
+            }
+        }
 
-                        # 4. 深度搜索 JSON
-                        if "{" in decoded_text or "[" in decoded_text:
-                            # 提取第一个 JSON 对象
-                            start = min([i for i in [decoded_text.find("{"), decoded_text.find("[")] if i != -1])
-                            json_candidate = decoded_text[start:]
-                            data_obj = json.loads(json_candidate)
-                            
-                            moves = find_moves_recursively(data_obj)
-                            if moves:
-                                raw_moves = moves
-                                break
-                    except: continue
-            except: continue
+        console.log = function() { checkAndCapture(arguments); originalLog.apply(console, arguments); };
+        console.info = function() { checkAndCapture(arguments); originalInfo.apply(console, arguments); };
+        """
+        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': hijack_script})
+
+        st.toast("控制台窃听器已植入，正在等待有效数据...")
+        driver.get(full_share_url)
+        
+        raw_moves = None
+        captured_list = []
+        
+        # 轮询 12 秒，确保抓到那个 type: 203 的包
+        for i in range(12): 
+            time.sleep(1)
+            captured_list = driver.execute_script("return window.__captured_chess_data;")
             
+            if captured_list and len(captured_list) > 0:
+                # 遍历抓到的所有非空包
+                for data_item in captured_list:
+                    # 在每个包里找棋谱
+                    found = find_moves_in_dict(data_item)
+                    if found:
+                        raw_moves = found
+                        break
+            if raw_moves:
+                st.toast(f"🎉 成功在第 {i+1} 秒捕获并解析棋谱！")
+                break
+        
         if not raw_moves:
-            # 🔴 失败时展示解码后的东西，这一步能让我们看到真相
-            debug_info = "\n".join([f"🔓 解码样本 {i+1}: {s}" for i, s in enumerate(decoded_samples[:5])])
-            return None, f"❌ 解码成功但未匹配到棋谱。\n请截图以下【解码内容】给我：\n{debug_info}"
+             debug_len = len(captured_list) if captured_list else 0
+             return None, f"❌ 监听超时。捕获了 {debug_len} 个有效包，但未识别出棋谱格式。\n(已自动忽略了 type: 402 这种空包)"
 
-        # 5. 组装 SGF
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Decoder_Live]DT[{datetime.date.today()}]"
+        # 组装 SGF
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Console_Hack]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         for move in raw_moves:
             try:
-                # 兼容不同格式
+                # 腾讯 Protobuf 解密后的格式：[x, y, color] 或 [color, x, y]
+                # 过滤出所有 0-18 的数字作为坐标
                 nums = [x for x in move if isinstance(x, (int, float))]
-                if len(nums) >= 4:
-                    c = "B" if nums[0] == 0 else "W"
-                    x, y = int(nums[-2]), int(nums[-1])
-                    if 0 <= x <= 18 and 0 <= y <= 18:
-                        sgf_moves += f";{c}[{num_to_sgf(x)}{num_to_sgf(y)}]"
-                        move_count += 1
+                
+                # 启发式规则：找最后两个 <=18 的数字当坐标
+                coords = [n for n in nums if 0 <= n <= 18]
+                if len(coords) >= 2:
+                    x, y = int(coords[-2]), int(coords[-1])
+                    
+                    # 颜色判断：如果有明确的 0/1 就用，没有就按步数黑白交替
+                    c = "B" if move_count % 2 == 0 else "W"
+                    # 尝试寻找颜色标识 (通常是第一个数)
+                    if nums[0] == 0: c = "B"
+                    elif nums[0] == 1: c = "W"
+
+                    sgf_moves += f";{c}[{num_to_sgf(x)}{num_to_sgf(y)}]"
+                    move_count += 1
             except: continue
 
-        return sgf_header + sgf_moves + ")", f"✅ 破译成功！Base64+Zlib 解锁 {move_count} 手棋。"
+        return sgf_header + sgf_moves + ")", f"✅ 完美破局！过滤掉空包后，成功提取 {move_count} 手。"
 
     except Exception as e:
         return None, f"❌ 运行异常: {str(e)}"
