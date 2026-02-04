@@ -330,113 +330,135 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (终极 WebSocket 监听版) ---
+# --- 腾讯围棋抓取工具 (终极透视诊断版) ---
+def find_moves_recursively(obj):
+    """
+    深度递归搜索：不看字段名，只找“长得很像棋谱”的数据结构
+    目标特征：列表长度>10，且第一个元素也是列表 [x, y, z, ...]
+    """
+    if isinstance(obj, list):
+        # 检查当前列表是否就是棋谱
+        if len(obj) > 10 and isinstance(obj[0], list) and len(obj[0]) >= 4:
+            # 进一步验证内部是否为数字，防止误判
+            try:
+                if isinstance(obj[0][2], (int, float)):
+                    return obj
+            except: pass
+        
+        # 如果不是，继续遍历列表里的每个元素
+        for item in obj:
+            res = find_moves_recursively(item)
+            if res: return res
+            
+    elif isinstance(obj, dict):
+        # 遍历字典的所有 value
+        for value in obj.values():
+            res = find_moves_recursively(value)
+            if res: return res
+            
+    elif isinstance(obj, str):
+        # 有时候 JSON 是以字符串形式存在的，尝试解包
+        if (obj.startswith("{") or obj.startswith("[")) and len(obj) > 50:
+            try:
+                nested_data = json.loads(obj)
+                res = find_moves_recursively(nested_data)
+                if res: return res
+            except: pass
+            
+    return None
+
 def fetch_txwq_websocket(input_str: str):
     """
-    终极解法：通过 Chrome Performance Log 监听底层 WebSocket 通信帧
-    直接截获直播流数据
+    Websocket 全量捕获 + 深度递归清洗 + 失败显形
     """
     input_str = input_str.strip()
-    
-    # 1. 链接校验与参数提取
-    is_live_link = False
     full_share_url = input_str
-    if "txwqshare" in input_str or "h5.txwq.qq.com" in input_str:
-        is_live_link = True
     
-    if not is_live_link:
-        return None, "⚠️ 请输入完整的直播分享链接（包含 svrid, roomid 等参数）。"
-
-    # 2. 配置 Chrome (开启性能日志是关键)
+    # ... (省略重复的 chrome_options 配置，保持不变，确保开启 performance log) ...
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new") # 无头模式
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    
-    # 👑 核心：开启 Performance Logging (这就是窃听电话的录音机)
     chrome_options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
     driver = None
+    captured_packets = [] # 用于存储抓到的原始包，供调试用
+
     try:
         driver = webdriver.Chrome(options=chrome_options)
-        
-        st.toast("正在接入 WebSocket 直播流...")
         driver.get(full_share_url)
-        
-        # 👑 必须等待：WebSocket 需要握手并接收首个全量数据包
-        # 直播数据通常在连接建立后的前几秒内发送
-        time.sleep(6) 
+        time.sleep(8) # 稍微多等一下，让 WebSocket 多飞一会儿
 
-        st.toast("正在分析通信数据帧...")
-        
-        # 3. 捞取日志，寻找棋谱
         logs = driver.get_log("performance")
         raw_moves = None
         
+        # 1. 第一遍筛网：把所有 WebSocket 数据捞出来
         for entry in logs:
             try:
                 log_msg = json.loads(entry["message"])["message"]
-                
-                # 只关心 WebSocket 接收到的帧 (Network.webSocketFrameReceived)
                 if log_msg["method"] == "Network.webSocketFrameReceived":
-                    # 提取数据载荷
                     payload = log_msg["params"]["response"]["payloadData"]
                     
-                    # 4. 暴力特征匹配：寻找长得很像棋谱的数组 "[[0,1,16,3], ...]"
-                    # 腾讯棋谱特征：嵌套列表，包含数字，长度通常比较长
-                    if "[[" in payload and "]]" in payload:
-                        # 简单的字符串清洗，尝试提取 JSON 数组部分
-                        start_idx = payload.find("[[")
-                        # 向后找可能的结尾
-                        potential_end = payload.rfind("]]") + 2
-                        candidate_str = payload[start_idx : potential_end]
-                        
-                        try:
-                            data = json.loads(candidate_str)
-                            # 验证是否为真棋谱：
-                            # 1. 是列表 2. 长度>10 (排除空包) 3. 第一个元素也是列表 4. 包含数字
-                            if (isinstance(data, list) and len(data) > 10 and 
-                                isinstance(data[0], list) and len(data[0]) >= 4 and
-                                isinstance(data[0][2], int)):
-                                raw_moves = data
-                                break # 找到了！收工！
-                        except:
-                            continue
-            except:
-                continue
-            if raw_moves: break
-            
+                    # 简单的清洗：去掉 Socket.io 的数字前缀 (如 "42" 或 "0")
+                    clean_payload = payload
+                    if len(payload) > 2 and payload[0].isdigit():
+                        # 尝试找到第一个 [ 或 {
+                        idx_list = payload.find("[")
+                        idx_dict = payload.find("{")
+                        start = min(idx for idx in [idx_list, idx_dict] if idx != -1)
+                        if start != -1:
+                            clean_payload = payload[start:]
+                    
+                    captured_packets.append(clean_payload[:500]) # 存个缩略图用于报错展示
+                    
+                    # 2. 第二遍筛网：深度递归搜索
+                    try:
+                        # 尝试解析外层 JSON
+                        data_obj = json.loads(clean_payload)
+                        # 扔进递归函数里找
+                        moves = find_moves_recursively(data_obj)
+                        if moves:
+                            raw_moves = moves
+                            break
+                    except:
+                        continue
+            except: continue
+        
+        # === 结果判定区 ===
         if not raw_moves:
-            return None, "❌ 监听成功，但未解析到有效棋谱。可能对局尚未开始或已结束。"
+            # 🔴 抓取失败时的 B 计划：展示“尸体”
+            # 如果没解析出来，我们把抓到的前 5 个数据包显示出来，让你看看到底是个啥
+            error_details = "\n\n".join([f"📦 包{i+1}: {p}..." for i, p in enumerate(captured_packets[:5])])
+            if not captured_packets:
+                return None, "❌ 监听成功，但未捕获到任何 WebSocket 数据帧。可能是 Chrome 版本或驱动不兼容。"
+            return None, f"❌ 捕获到 {len(captured_packets)} 个数据包，但递归搜索未发现棋谱特征。\n\n**原始数据样本 (请截图给我):**\n{error_details}"
 
-        # 5. 组装 SGF
-        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_WebSocket_Live]DT[{datetime.date.today()}]"
+        # 3. 组装 SGF (保持不变)
+        sgf_header = f"(;GM[1]SZ[19]AP[Txwq_DeepScan_Live]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         for move in raw_moves:
             try:
-                # 腾讯格式通常是: [颜色(0黑1白), 手数, X, Y, ...]
-                c = "B" if move[0] == 0 else "W"
-                x, y = int(move[2]), int(move[3]) 
-                # 兼容不同版本坐标位置
-                if x > 18: x = int(move[-2])
-                if y > 18: y = int(move[-1])
-                
-                if 0 <= x <= 18 and 0 <= y <= 18:
-                    sgf_moves += f";{c}[{num_to_sgf(x)}{num_to_sgf(y)}]"
-                    move_count += 1
+                # 兼容不同坐标格式：[0, 15, 3, 4] 或 [0, 15, x:3, y:4]
+                # 暴力取最后两个数字作为坐标
+                nums = [x for x in move if isinstance(x, (int, float))]
+                if len(nums) >= 4:
+                    c = "B" if nums[0] == 0 else "W"
+                    x, y = int(nums[-2]), int(nums[-1])
+                    if 0 <= x <= 18 and 0 <= y <= 18:
+                        sgf_moves += f";{c}[{num_to_sgf(x)}{num_to_sgf(y)}]"
+                        move_count += 1
             except: continue
 
-        return sgf_header + sgf_moves + ")", f"✅ 完美破局！从 WebSocket 流截获 {move_count} 手。"
+        return sgf_header + sgf_moves + ")", f"✅ 深度扫描成功！从复杂嵌套结构中提取 {move_count} 手。"
 
     except Exception as e:
-        return None, f"❌ 监听异常: {str(e)}"
+        return None, f"❌ 运行异常: {str(e)}"
     finally:
-        if driver:
-            driver.quit()
+        if driver: driver.quit()
 
 # ===============================
 # 页面主逻辑
