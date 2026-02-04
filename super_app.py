@@ -332,30 +332,46 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 (终极修正：精准窃听版) ---
-def find_moves_in_dict(obj):
+# --- 腾讯围棋抓取工具 (终极诊断：开箱验货版) ---
+def find_moves_in_dict(obj, depth=0):
     """
-    在截获的 chessData 对象中，自动寻找最像棋谱的数组
+    递归搜索棋谱，增加了对腾讯常见字段的特异性检查
     """
+    if depth > 10: return None # 防止无限递归
+    
     if isinstance(obj, list):
         # 特征：列表长度>10，且第一个元素也是列表 [x, y, z]
         if len(obj) > 10 and isinstance(obj[0], list) and len(obj[0]) >= 3:
-            # 验证元素是否为数字
             try:
-                if isinstance(obj[0][0], (int, float)): return obj
+                # 腾讯特征：前三个数里一定有两个是 <=18 的坐标
+                nums = [n for n in obj[0] if isinstance(n, (int, float))]
+                coords = [n for n in nums if 0 <= n <= 18]
+                if len(coords) >= 2:
+                    return obj
             except: pass
+        
         for item in obj:
-            res = find_moves_in_dict(item)
+            res = find_moves_in_dict(item, depth+1)
             if res: return res
+            
     elif isinstance(obj, dict):
+        # 优先检查常见的棋谱字段名，提升命中率
+        target_keys = ['moves', 'list', 'chess', 'steps', 'records']
+        for key in target_keys:
+            if key in obj:
+                res = find_moves_in_dict(obj[key], depth+1)
+                if res: return res
+        
+        # 如果没找到，再遍历所有 value
         for value in obj.values():
-            res = find_moves_in_dict(value)
+            res = find_moves_in_dict(value, depth+1)
             if res: return res
+            
     return None
 
 def fetch_txwq_websocket(input_str: str):
     """
-    利用 Protobuf 解密后的 Console Log 进行截获 (自动过滤 undefined 包)
+    控制台窃听 + 失败时强制透视数据结构
     """
     input_str = input_str.strip()
     full_share_url = input_str
@@ -376,88 +392,82 @@ def fetch_txwq_websocket(input_str: str):
     try:
         driver = webdriver.Chrome(options=chrome_options)
 
-        # 👑 核心：注入“挑食”的窃听代码
+        # 👑 注入窃听代码 (保持不变，这部分工作完美)
         hijack_script = """
-        window.__captured_chess_data = []; // 用数组存，防止漏掉
-        
+        window.__captured_chess_data = [];
         var originalLog = console.log;
         var originalInfo = console.info;
-        
         function checkAndCapture(args) {
             for (var i = 0; i < args.length; i++) {
                 var arg = args[i];
                 if (arg && typeof arg === 'object') {
-                    // 🛡️ 过滤器：只有当 chessData 存在且不是 undefined 时才抓！
-                    // 这完美避开了你发现的 type: 402 空包
-                    if (arg.chessData !== undefined && arg.chessData !== null) {
+                    // 只要有 chessData 且不为空，就抓
+                    if (arg.chessData) {
                         window.__captured_chess_data.push(arg.chessData);
                     }
-                    // 双保险：有时候它直接把数据叫 moves 或 subChunks
                     else if (arg.moves || arg.subChunks) {
                          window.__captured_chess_data.push(arg);
                     }
                 }
             }
         }
-
         console.log = function() { checkAndCapture(arguments); originalLog.apply(console, arguments); };
         console.info = function() { checkAndCapture(arguments); originalInfo.apply(console, arguments); };
         """
         driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': hijack_script})
 
-        st.toast("控制台窃听器已植入，正在等待有效数据...")
+        st.toast("正在潜入控制台...")
         driver.get(full_share_url)
         
         raw_moves = None
         captured_list = []
         
-        # 轮询 12 秒，确保抓到那个 type: 203 的包
+        # 轮询 12 秒
         for i in range(12): 
             time.sleep(1)
             captured_list = driver.execute_script("return window.__captured_chess_data;")
             
             if captured_list and len(captured_list) > 0:
-                # 遍历抓到的所有非空包
                 for data_item in captured_list:
-                    # 在每个包里找棋谱
                     found = find_moves_in_dict(data_item)
                     if found:
                         raw_moves = found
                         break
-            if raw_moves:
-                st.toast(f"🎉 成功在第 {i+1} 秒捕获并解析棋谱！")
-                break
+            if raw_moves: break
         
+        # === 🚑 诊断核心区 ===
         if not raw_moves:
-             debug_len = len(captured_list) if captured_list else 0
-             return None, f"❌ 监听超时。捕获了 {debug_len} 个有效包，但未识别出棋谱格式。\n(已自动忽略了 type: 402 这种空包)"
+             debug_msg = ""
+             if captured_list:
+                 debug_msg += f"共捕获 {len(captured_list)} 个数据包，内部结构如下：\n\n"
+                 for idx, packet in enumerate(captured_list[:3]): # 只展示前3个
+                     # 强制转 JSON 字符串，防止格式隐藏
+                     packet_str = json.dumps(packet, default=str, ensure_ascii=False)
+                     # 截取前 800 个字符展示，足够看清 key 了
+                     debug_msg += f"📦 [包 {idx+1}] (前800字符):\n{packet_str[:800]}\n\n{'-'*30}\n"
+             else:
+                 debug_msg = "未捕获到任何包含 chessData 的对象。"
+                 
+             return None, f"❌ 自动解析失败。请截图以下【数据结构】给我，我立马就能写出针对性代码：\n{debug_msg}"
 
-        # 组装 SGF
+        # 组装 SGF (逻辑不变)
         sgf_header = f"(;GM[1]SZ[19]AP[Txwq_Console_Hack]DT[{datetime.date.today()}]"
         sgf_moves = ""
         move_count = 0
         for move in raw_moves:
             try:
-                # 腾讯 Protobuf 解密后的格式：[x, y, color] 或 [color, x, y]
-                # 过滤出所有 0-18 的数字作为坐标
                 nums = [x for x in move if isinstance(x, (int, float))]
-                
-                # 启发式规则：找最后两个 <=18 的数字当坐标
                 coords = [n for n in nums if 0 <= n <= 18]
                 if len(coords) >= 2:
                     x, y = int(coords[-2]), int(coords[-1])
-                    
-                    # 颜色判断：如果有明确的 0/1 就用，没有就按步数黑白交替
                     c = "B" if move_count % 2 == 0 else "W"
-                    # 尝试寻找颜色标识 (通常是第一个数)
                     if nums[0] == 0: c = "B"
                     elif nums[0] == 1: c = "W"
-
                     sgf_moves += f";{c}[{num_to_sgf(x)}{num_to_sgf(y)}]"
                     move_count += 1
             except: continue
 
-        return sgf_header + sgf_moves + ")", f"✅ 完美破局！过滤掉空包后，成功提取 {move_count} 手。"
+        return sgf_header + sgf_moves + ")", f"✅ 提取成功！共 {move_count} 手。"
 
     except Exception as e:
         return None, f"❌ 运行异常: {str(e)}"
