@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import datetime
 import requests
@@ -42,6 +43,25 @@ def player_sort_key(name: str):
         py = name
 
     return (0, py, name)
+
+
+
+def safe_dataframe(data, height=None):
+    """Streamlit compat across old/new versions."""
+    kwargs = {}
+    if height is not None:
+        kwargs["height"] = height
+    try:
+        st.dataframe(data, use_container_width=True, **kwargs)
+    except TypeError:
+        st.dataframe(data, **kwargs)
+
+def safe_altair_chart(chart):
+    """Altair chart compat across old/new versions."""
+    try:
+        st.altair_chart(chart, use_container_width=True)
+    except TypeError:
+        st.altair_chart(chart)
 
 # ===============================
 # 基础配置
@@ -407,6 +427,7 @@ with st.sidebar:
     
     # 新增：腾讯围棋抓取小工具
     st.header("🛠 实用工具")
+    st.markdown("🔗 [转播大厅](https://go.7dm7va.top)")
     with st.expander("📥 腾讯围棋棋谱抓取"):
         st.caption("输入对局 ID 即可提取 SGF 文件")
         cid = st.text_input("Chess ID", placeholder="如: 1770092663030101341")
@@ -530,9 +551,12 @@ with col_rank:
                             return 'color: #dc2626;'  # 红色
                     return ''
 
-                styled = display_df.style.map(highlight_delta, subset=['变化'])
-
-                st.dataframe(styled, width="stretch")
+                try:
+                    styled = display_df.style.applymap(highlight_delta, subset=['变化'])
+                    safe_dataframe(styled)
+                except Exception:
+                    # Fallback for old pandas/streamlit combinations
+                    safe_dataframe(display_df)
                 st.caption(f"注：榜单仅显示总对局数 ≥ {threshold} 局的选手。")
             else:
                 st.info(f"暂无满足条件的选手（需对局 ≥ {threshold} 且在活跃期内）。")
@@ -570,7 +594,7 @@ with col_trend:
                 )
                 .interactive()
             )
-            st.altair_chart(chart, width="stretch", height="content")
+            safe_altair_chart(chart)
     else:
         st.info("暂无历史 Elo 数据（先录入几盘吧）。")
 
@@ -772,7 +796,7 @@ if target != "(请选择)":
             "%Y-%m-%d"
         )
         cols_to_show = ["日期", "选手1", "选手2", "获胜者", "备注"]
-        st.dataframe(display_games[cols_to_show], width="stretch")
+        safe_dataframe(display_games[cols_to_show])
     else:
         st.info("暂无对局记录")
 
@@ -798,7 +822,7 @@ if not df.empty:
         "%Y-%m-%d"
     )
     cols_to_show = ["日期", "选手1", "选手2", "获胜者", "备注"]
-    st.dataframe(full_display[cols_to_show], width="stretch", height=500)
+    safe_dataframe(full_display[cols_to_show], height=500)
 else:
     st.info("目前还没有任何对局记录。")
 
@@ -880,7 +904,7 @@ else:
                 "%Y-%m-%d"
             )
             cols_to_show = ["日期", "选手1", "选手2", "获胜者", "备注"]
-            st.dataframe(display_h2h[cols_to_show], width="stretch", height=400)
+            safe_dataframe(display_h2h[cols_to_show], height=400)
 
 # ========== 数据维护（最近 N 条记录） ==========
 st.divider()
@@ -917,12 +941,16 @@ else:
     recent_display["删除?"] = False
 
     st.caption(f"仅展示最近 {len(recent_display)} 条对局，可在此修改字段或勾选删除。")
-    edited = st.data_editor(
-        recent_display,
-        num_rows="fixed",
-        hide_index=True,
-        key="data_maintain_editor",
-    )
+    if hasattr(st, "data_editor"):
+        edited = st.data_editor(
+            recent_display,
+            num_rows="fixed",
+            hide_index=True,
+            key="data_maintain_editor",
+        )
+    else:
+        st.warning("当前运行环境不支持在线编辑（data_editor），请升级 Streamlit 后使用。")
+        edited = recent_display.copy()
 
     if st.button("💾 保存上述修改到 data.csv"):
         # 把中文列名映射回内部列名
