@@ -527,6 +527,9 @@ with col_rank:
             full_df['Period_Change'] = (
                 full_df['Rating'] - full_df['Rating_Before_Period']
             ).where(full_df['Period_Games'] > 0)
+            # Streamlit 会把空值显示成 None。用 0 作为“本周期未对局”的
+            # 内部占位，展示时再格式化为“—”；对局列仍可明确区分两种情况。
+            full_df['Period_Change'] = full_df['Period_Change'].fillna(0)
 
             # 只统计总局数 ≥ threshold 的选手
             threshold = 15
@@ -576,7 +579,7 @@ with col_rank:
                         return '—'
                     change = float(change)
                     if change == 0:
-                        return '0'
+                        return '—'
                     arrow = '↑' if change > 0 else '↓'
                     return f"{arrow} {abs(int(change))}"
 
@@ -607,6 +610,7 @@ with col_rank:
                     f"变化统计为{change_window_label}内的等级分涨跌；"
                     f"对局列为该时段的实际对局数。"
                 )
+                st.caption("排序提示：变化列的 ↑ 表示从小到大（跌分最多在前）；再点一次变为 ↓，涨分最多在前。")
             else:
                 st.info(f"暂无满足条件的选手（需对局 ≥ {threshold} 且在活跃期内）。")
         else:
