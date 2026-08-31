@@ -467,12 +467,41 @@ with col_rank:
         )
         stats['Win_Rate'] = (stats['Win_Count'] / stats['Total_Games'] * 100).round(1).astype(str) + '%'
 
-        # --- 2.1 计算“上一局后的等级分变化 Delta” ---
+        # --- 2.1 计算一段时间内的等级分变化与对局数 ---
+        # “上一局涨跌”会在很久不下棋后仍然显示，容易被误读成近况。
+        # 因此这里按选定时间段，计算期末等级分相对期初的变化。
+        change_window_days = {
+            '近三个月': 90,
+            '近半年': 180,
+            '近一年': 365,
+        }
+        change_window_label = st.selectbox(
+            '变化周期',
+            options=list(change_window_days),
+            index=1,
+            key='rank_change_window',
+        )
+        period_days = change_window_days[change_window_label]
+        period_start = pd.Timestamp.now().normalize() - pd.DateOffset(days=period_days)
         h_sorted = history_df.sort_values(['Name', 'Date']).copy()
-        h_sorted['Prev_Rating'] = h_sorted.groupby('Name')['Rating'].shift(1)
-        last_rows = h_sorted.groupby('Name').tail(1)[['Name', 'Rating', 'Prev_Rating']]
-        last_rows['Delta'] = last_rows['Rating'] - last_rows['Prev_Rating']
-        delta_df = last_rows[['Name', 'Delta']]
+
+        # 每人这段时间实际下了几局；没有下棋的人不显示陈旧的涨跌。
+        period_games = (
+            h_sorted[h_sorted['Date'] >= period_start]
+            .groupby('Name')
+            .size()
+            .rename('Period_Games')
+            .reset_index()
+        )
+
+        # 找到时间段开始前的最后一个等级分，作为比较基准。
+        # 新选手在时间段内首次出现时，以初始分 1500 为基准。
+        rating_before_period = (
+            h_sorted[h_sorted['Date'] < period_start]
+            .groupby('Name')
+            .tail(1)[['Name', 'Rating']]
+            .rename(columns={'Rating': 'Rating_Before_Period'})
+        )
 
         # --- 3. 组装当前等级分 & 最近活跃时间 ---
         rank_data = []
@@ -488,11 +517,16 @@ with col_rank:
         if not rank_df.empty:
             full_df = (rank_df
                        .merge(stats, on='Name', how='left')
-                       .merge(delta_df, on='Name', how='left'))
+                       .merge(period_games, on='Name', how='left')
+                       .merge(rating_before_period, on='Name', how='left'))
             full_df['Total_Games'] = full_df['Total_Games'].fillna(0).astype(int)
             full_df['Win_Rate'] = full_df['Win_Rate'].fillna('0.0%')
             full_df['Win_Count'] = full_df['Win_Count'].fillna(0).astype(int)
-            full_df['Delta'] = full_df['Delta'].fillna(0)
+            full_df['Period_Games'] = full_df['Period_Games'].fillna(0).astype(int)
+            full_df['Rating_Before_Period'] = full_df['Rating_Before_Period'].fillna(1500)
+            full_df['Period_Change'] = (
+                full_df['Rating'] - full_df['Rating_Before_Period']
+            ).where(full_df['Period_Games'] > 0)
 
             # 只统计总局数 ≥ threshold 的选手
             threshold = 15
@@ -525,25 +559,30 @@ with col_rank:
 
                 display_df['Name'] = display_df.apply(decorate_name, axis=1)
 
-                # 生成“变化”列（↑ 12 / ↓ 8 / —）
-                def format_delta_cell(v):
+                # 生成“近半年变化”列（↑ 12（8局）/ ↓ 8（3局）/ —）
+                def format_change_cell(change, games):
+                    if games <= 0 or pd.isna(change):
+                        return '—'
                     try:
-                        v = float(v)
+                        change = float(change)
                     except Exception:
                         return '—'
-                    if v == 0:
-                        return '—'
-                    arrow = '↑' if v > 0 else '↓'
-                    return f"{arrow} {abs(int(v))}"
+                    if change == 0:
+                        return f"—（{games}局）"
+                    arrow = '↑' if change > 0 else '↓'
+                    return f"{arrow} {abs(int(change))}（{games}局）"
 
-                display_df['Delta'] = display_df['Delta'].apply(format_delta_cell)
+                display_df['Period_Change'] = display_df.apply(
+                    lambda row: format_change_cell(row['Period_Change'], row['Period_Games']),
+                    axis=1,
+                )
 
                 # 整理列名
-                display_df = display_df[['Name', 'Rating', 'Delta', 'Total_Games', 'Win_Rate']]
-                display_df.columns = ['选手', '等级分', '变化', '总局数', '总胜率']
+                display_df = display_df[['Name', 'Rating', 'Period_Change', 'Total_Games', 'Win_Rate']]
+                display_df.columns = ['选手', '等级分', f'{change_window_label}变化', '总局数', '总胜率']
 
                 # 着色：涨分绿、跌分红
-                def highlight_delta(val):
+                def highlight_change(val):
                     if isinstance(val, str):
                         if val.startswith('↑'):
                             return 'color: #16a34a;'  # 绿色
@@ -551,13 +590,13 @@ with col_rank:
                             return 'color: #dc2626;'  # 红色
                     return ''
 
-                try:
-                    styled = display_df.style.applymap(highlight_delta, subset=['变化'])
-                    safe_dataframe(styled)
-                except Exception:
-                    # Fallback for old pandas/streamlit combinations
-                    safe_dataframe(display_df)
-                st.caption(f"注：榜单仅显示总对局数 ≥ {threshold} 局的选手。")
+                change_column = f'{change_window_label}变化'
+                styled = display_df.style.map(highlight_change, subset=[change_column])
+                safe_dataframe(styled)
+                st.caption(
+                    f"注：榜单仅显示总对局数 ≥ {threshold} 局的选手；"
+                    f"变化统计为{change_window_label}内的等级分涨跌，括号内为该时段对局数。"
+                )
             else:
                 st.info(f"暂无满足条件的选手（需对局 ≥ {threshold} 且在活跃期内）。")
         else:
