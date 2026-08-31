@@ -46,9 +46,9 @@ def player_sort_key(name: str):
 
 
 
-def safe_dataframe(data, height=None):
+def safe_dataframe(data, height=None, **extra_kwargs):
     """Streamlit compat across old/new versions."""
-    kwargs = {}
+    kwargs = dict(extra_kwargs)
     if height is not None:
         kwargs["height"] = height
     try:
@@ -564,8 +564,9 @@ with col_rank:
                 display_df = display_df[
                     ['Name', 'Rating', 'Period_Change', 'Period_Games', 'Total_Games', 'Win_Rate']
                 ]
-                change_column = f'{change_window_label}变化'
-                games_column = f'{change_window_label}对局（局）'
+                # 周期已在上方选择，表头保持简洁，避免在窄屏横向溢出。
+                change_column = '变化'
+                games_column = '对局'
                 display_df.columns = [
                     '选手', '等级分', change_column, games_column, '总局数', '总胜率'
                 ]
@@ -591,9 +592,16 @@ with col_rank:
                 styled = (
                     display_df.style
                     .map(highlight_change, subset=[change_column])
-                    .format({change_column: format_change_cell})
+                    .format({change_column: format_change_cell}, na_rep='—')
                 )
-                safe_dataframe(styled)
+                table_columns = {
+                    '选手': st.column_config.TextColumn(width='medium'),
+                    '等级分': st.column_config.NumberColumn(width='small'),
+                    '对局': st.column_config.NumberColumn(width='small'),
+                    '总局数': st.column_config.NumberColumn(width='small'),
+                    '总胜率': st.column_config.TextColumn(width='small'),
+                }
+                safe_dataframe(styled, column_config=table_columns)
                 st.caption(
                     f"注：榜单仅显示总对局数 ≥ {threshold} 局的选手；"
                     f"变化统计为{change_window_label}内的等级分涨跌；"
