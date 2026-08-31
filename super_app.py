@@ -597,14 +597,9 @@ with col_rank:
                     .map(highlight_change, subset=[change_column])
                     .format({change_column: format_change_cell}, na_rep='—')
                 )
-                table_columns = {
-                    '选手': st.column_config.TextColumn(width='medium'),
-                    '等级分': st.column_config.NumberColumn(width='small'),
-                    '对局': st.column_config.NumberColumn(width='small'),
-                    '总局数': st.column_config.NumberColumn(width='small'),
-                    '总胜率': st.column_config.TextColumn(width='small'),
-                }
-                safe_dataframe(styled, column_config=table_columns)
+                # 不额外指定列配置：它会和 Styler 在部分 Streamlit 版本中
+                # 产生一列无内容的空白区域。简短表头会让表格按内容自然收紧。
+                safe_dataframe(styled)
                 st.caption(
                     f"注：榜单仅显示总对局数 ≥ {threshold} 局的选手；"
                     f"变化统计为{change_window_label}内的等级分涨跌；"
