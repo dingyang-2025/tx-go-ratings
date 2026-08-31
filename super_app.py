@@ -559,43 +559,45 @@ with col_rank:
 
                 display_df['Name'] = display_df.apply(decorate_name, axis=1)
 
-                # 生成“近半年变化”列（↑ 12（8局）/ ↓ 8（3局）/ —）
-                def format_change_cell(change, games):
-                    if games <= 0 or pd.isna(change):
+                # 保留“变化”为数值，才能在点击表头时按真实涨跌排序。
+                # 箭头只负责显示，不参与排序；对局数也拆成独立列。
+                display_df = display_df[
+                    ['Name', 'Rating', 'Period_Change', 'Period_Games', 'Total_Games', 'Win_Rate']
+                ]
+                change_column = f'{change_window_label}变化'
+                games_column = f'{change_window_label}对局（局）'
+                display_df.columns = [
+                    '选手', '等级分', change_column, games_column, '总局数', '总胜率'
+                ]
+
+                def format_change_cell(change):
+                    if pd.isna(change):
                         return '—'
-                    try:
-                        change = float(change)
-                    except Exception:
-                        return '—'
+                    change = float(change)
                     if change == 0:
-                        return f"—（{games}局）"
+                        return '0'
                     arrow = '↑' if change > 0 else '↓'
-                    return f"{arrow} {abs(int(change))}（{games}局）"
-
-                display_df['Period_Change'] = display_df.apply(
-                    lambda row: format_change_cell(row['Period_Change'], row['Period_Games']),
-                    axis=1,
-                )
-
-                # 整理列名
-                display_df = display_df[['Name', 'Rating', 'Period_Change', 'Total_Games', 'Win_Rate']]
-                display_df.columns = ['选手', '等级分', f'{change_window_label}变化', '总局数', '总胜率']
+                    return f"{arrow} {abs(int(change))}"
 
                 # 着色：涨分绿、跌分红
                 def highlight_change(val):
-                    if isinstance(val, str):
-                        if val.startswith('↑'):
+                    if pd.notna(val):
+                        if val > 0:
                             return 'color: #16a34a;'  # 绿色
-                        if val.startswith('↓'):
+                        if val < 0:
                             return 'color: #dc2626;'  # 红色
                     return ''
 
-                change_column = f'{change_window_label}变化'
-                styled = display_df.style.map(highlight_change, subset=[change_column])
+                styled = (
+                    display_df.style
+                    .map(highlight_change, subset=[change_column])
+                    .format({change_column: format_change_cell})
+                )
                 safe_dataframe(styled)
                 st.caption(
                     f"注：榜单仅显示总对局数 ≥ {threshold} 局的选手；"
-                    f"变化统计为{change_window_label}内的等级分涨跌，括号内为该时段对局数。"
+                    f"变化统计为{change_window_label}内的等级分涨跌；"
+                    f"对局列为该时段的实际对局数。"
                 )
             else:
                 st.info(f"暂无满足条件的选手（需对局 ≥ {threshold} 且在活跃期内）。")
