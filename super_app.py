@@ -223,7 +223,10 @@ def calculate_ratings(
     - last_active: {name -> 最近一局时间}
     - history_df: 每一局后的历史 Elo（给折线图 / 选手极值用）
     """
-    history_columns = ["Date", "Name", "Rating", "Opponent", "Result", "Note1", "Note2"]
+    history_columns = [
+        "Game_ID", "Date", "Name", "Rating_Before", "Rating", "Rating_Change",
+        "Opponent", "Result", "Note1", "Note2",
+    ]
 
     if df is None or df.empty:
         return {}, {}, pd.DataFrame(columns=history_columns)
@@ -235,7 +238,7 @@ def calculate_ratings(
     # 先按日期排序，保证 Elo 时间顺序正确
     df_sorted = df.sort_values("Date")
 
-    for _, row in df_sorted.iterrows():
+    for game_id, row in df_sorted.iterrows():
         p1 = standardize_name(row.get("Player1"))
         p2 = standardize_name(row.get("Player2"))
         winner = standardize_name(row.get("Winner"))
@@ -277,9 +280,12 @@ def calculate_ratings(
         # 记录胜者
         history.append(
             {
+                "Game_ID": game_id,
                 "Date": date,
                 "Name": winner,
+                "Rating_Before": r_w,
                 "Rating": new_r_w,
+                "Rating_Change": new_r_w - r_w,
                 "Opponent": loser,
                 "Result": "Win",
                 "Note1": note1,
@@ -289,9 +295,12 @@ def calculate_ratings(
         # 记录负者
         history.append(
             {
+                "Game_ID": game_id,
                 "Date": date,
                 "Name": loser,
+                "Rating_Before": r_l,
                 "Rating": new_r_l,
+                "Rating_Change": new_r_l - r_l,
                 "Opponent": winner,
                 "Result": "Loss",
                 "Note1": note1,
@@ -448,7 +457,8 @@ with st.sidebar:
                 st.warning("请输入有效 ID")
 
 # ========== 实时排行 & 多人 Elo 走势 ==========
-col_rank, col_trend = st.columns([1, 2])
+# 排行榜包含多列数据，适当扩大它的展示宽度，避免横向滚动。
+col_rank, col_trend = st.columns([2, 3])
 
 with col_rank:
     st.subheader("🏆 实时排行 (Top Ratings)")
@@ -831,20 +841,48 @@ if target != "(请选择)":
     # 个人完整对局记录
     st.markdown(f"#### 📜 {target} 完整对局记录")
     if not my_games.empty:
-        display_games = my_games.rename(
+        # history_df 每局都带原始 CSV 行号（Game_ID），因此即使同一天有多局，
+        # 也能准确合并到该选手的这一局等级分涨跌。
+        my_rating_changes = (
+            history_df[history_df["Name"] == target]
+            .set_index("Game_ID")[["Rating_Change"]]
+        )
+        display_games = my_games.join(my_rating_changes, how="left").rename(
             columns={
                 "Date": "日期",
                 "Player1": "选手1",
                 "Player2": "选手2",
                 "Winner": "获胜者",
+                "Rating_Change": "等级分变化",
                 "Note": "备注",
             }
         ).copy()
         display_games["日期"] = pd.to_datetime(display_games["日期"]).dt.strftime(
             "%Y-%m-%d"
         )
-        cols_to_show = ["日期", "选手1", "选手2", "获胜者", "备注"]
-        safe_dataframe(display_games[cols_to_show])
+        cols_to_show = ["日期", "选手1", "选手2", "获胜者", "等级分变化", "备注"]
+
+        def format_rating_change(change):
+            if pd.isna(change) or abs(change) < 0.05:
+                return "—"
+            arrow = "↑" if change > 0 else "↓"
+            sign = "+" if change > 0 else "−"
+            return f"{arrow} {sign}{abs(change):.1f}"
+
+        def highlight_rating_change(change):
+            if pd.notna(change):
+                if change > 0:
+                    return "color: #16a34a;"
+                if change < 0:
+                    return "color: #dc2626;"
+            return ""
+
+        styled_games = (
+            display_games[cols_to_show].style
+            .map(highlight_rating_change, subset=["等级分变化"])
+            .format({"等级分变化": format_rating_change}, na_rep="—")
+        )
+        safe_dataframe(styled_games)
     else:
         st.info("暂无对局记录")
 
