@@ -1,7 +1,5 @@
 from __future__ import annotations
 import os
-import datetime
-import requests
 import altair as alt
 import pandas as pd
 import streamlit as st
@@ -10,7 +8,6 @@ from rating_system import (
     STATUS_STABLE,
     VERSION_LABELS,
     calculate_ratings as calculate_rating_result,
-    classify_event,
     k_factor_for,
     rating_status,
 )
@@ -179,33 +176,6 @@ def load_data() -> pd.DataFrame:
     return df
 
 
-def save_game(date, p1, p2, winner, note1, note2) -> None:
-    """往 data.csv 追加一行对局记录。"""
-    p1_std = standardize_name(p1)
-    p2_std = standardize_name(p2)
-    winner_std = standardize_name(winner)
-
-    if isinstance(date, (datetime.date, datetime.datetime)):
-        date_str = date.strftime("%Y-%m-%d")
-    else:
-        date_str = str(date)
-
-    new_row = pd.DataFrame(
-        {
-            "Date": [date_str],
-            "Player1": [p1_std],
-            "Player2": [p2_std],
-            "Winner": [winner_std],
-            "Note1": [note1 or ""],
-            "Note2": [note2 or ""],
-        }
-    )
-
-    header = not os.path.exists(FILE_PATH) or os.path.getsize(FILE_PATH) == 0
-    # 直接以追加方式写入
-    new_row.to_csv(FILE_PATH, mode="a", header=header, index=False)
-
-
 def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
     """返回选手对手统计（总局数 / 胜率等）。"""
     if df is None or df.empty or not player_name:
@@ -241,46 +211,49 @@ def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
         )
     return results
 
-# --- 腾讯围棋抓取工具 ---
-def fetch_txwq_content(chessid: str):
-    """从腾讯接口获取 SGF 内容"""
-    url = "http://happyapp.huanle.qq.com/cgi-bin/CommonMobileCGI/TXWQFetchChess"
-    data = {"chessid": chessid}
-    try:
-        resp = requests.post(url, data=data, timeout=10)
-        resp.raise_for_status()
-        js = resp.json()
-        if js.get("result") == 0:
-            return js.get("chess")
-        else:
-            st.error(f"API 报错: {js.get('resultstr')}")
-            return None
-    except Exception as e:
-        st.error(f"连接失败: {e}")
-        return None
-
 # ===============================
 # 页面主逻辑
 # ===============================
 
-st.set_page_config(page_title="公司围棋大脑", layout="wide")
+st.set_page_config(
+    page_title="公司围棋大脑",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+st.markdown(
+    """
+    <style>
+    .block-container {
+        max-width: 1120px;
+        padding-top: 1.5rem;
+        padding-bottom: 3rem;
+    }
+    @media (max-width: 768px) {
+        .block-container {
+            padding: 0.8rem 0.65rem 2.5rem;
+        }
+        h1 { font-size: 1.85rem !important; }
+        h2, h3 { line-height: 1.25 !important; }
+        [data-testid="stMetricValue"] { font-size: 1.45rem; }
+        [data-testid="stDataFrame"] { font-size: 0.86rem; }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 st.title("Go Ratings & Stats 📊")
 
 # --- 读取数据 & 选择等级分规则 ---
 df = load_data()
 
-st.sidebar.header("⚙️ 等级分规则")
-rating_version_label = st.sidebar.radio(
-    "计算版本",
-    options=list(VERSION_LABELS.values()),
-    index=0,
-    help="默认使用 v2；v1 仅用于查看规则升级前的结果。",
-)
-rating_version = next(
-    version for version, label in VERSION_LABELS.items() if label == rating_version_label
-)
-
-with st.sidebar.expander("查看 v2 规则", expanded=False):
+with st.expander("⚙️ 等级分规则与版本", expanded=False):
+    rating_version_label = st.radio(
+        "计算版本",
+        options=list(VERSION_LABELS.values()),
+        index=0,
+        horizontal=True,
+        help="默认使用 v2；v1 仅用于查看规则升级前的结果。",
+    )
     st.markdown(
         """
         - **动态 K：** 有效对局少于 10 局用 48，10～不足 30 局用 40，30 局起用 28。
@@ -298,100 +271,20 @@ with st.sidebar.expander("查看 v2 规则", expanded=False):
                 mime="text/csv",
             )
 
+rating_version = next(
+    version for version, label in VERSION_LABELS.items() if label == rating_version_label
+)
+
 rating_result = calculate_rating_result(df, version=rating_version)
 ratings = rating_result.ratings
 last_active = rating_result.last_active
 history_df = rating_result.history
 effective_games = rating_result.effective_games
 st.caption(
-    "当前采用：**动态 K + 赛事权重（v2）**。可在左侧切换旧规则对照。"
+    "当前采用：**动态 K + 赛事权重（v2）**。需要时可展开上方规则切换旧版对照。"
     if rating_version == "v2"
     else "当前正在查看：**v1 旧规则**。这是对照视图，不是默认榜单。"
 )
-
-# 动态获选手名单（仅根据出现过的双方）
-# 先用 standardize_name 清洗，再用中文拼音 + 英文在后的规则排序
-p1_names = df["Player1"].dropna().map(standardize_name)
-p2_names = df["Player2"].dropna().map(standardize_name)
-all_known_players = set(p1_names) | set(p2_names)
-
-# 去掉空名和 'nan' 之类异常
-cleaned_players = [
-    name
-    for name in all_known_players
-    if name and str(name).strip().lower() != "nan"
-]
-
-# 使用和其它地方一致的排序规则：中文按姓氏拼音，英文排在后面
-known_names = sorted(cleaned_players, key=player_sort_key)
-
-
-# ========== 侧边栏：录入新对局 ==========
-with st.sidebar:
-    st.header("📝 录入新对局")
-
-    with st.form("add_game"):
-        new_date = st.date_input("日期", value=datetime.date.today())
-
-        p1 = st.selectbox(
-            "选手1 (Player1)",
-            ["(请选择)"] + known_names + ["(手动输入)"],
-            index=0,
-        )
-        p2 = st.selectbox(
-            "选手2 (Player2)",
-            ["(请选择)"] + known_names + ["(手动输入)"],
-            index=0,
-        )
-
-        if p1 == "(手动输入)":
-            p1 = st.text_input("请输入选手1名字").strip()
-        if p2 == "(手动输入)":
-            p2 = st.text_input("请输入选手2名字").strip()
-
-        winner_choice = st.radio("胜者", ["选手1胜", "选手2胜"], horizontal=True)
-
-        note1 = st.text_input("赛事名称 (Note1)", placeholder="例如：12届腾赛")
-        st.caption("v2 自动识别现场赛、预选赛及三类杯赛；未识别赛事会保留记录，但不计等级分。")
-        note2 = st.text_input("轮次 (Note2)", placeholder="例如：第一轮")
-
-        submitted = st.form_submit_button("提交")
-
-        if submitted:
-            if not p1 or not p2 or p1 in ("(请选择)",) or p2 in ("(请选择)",) or p1 == p2:
-                st.error("请完整填写选手信息，且两位选手不能相同。")
-            else:
-                final_winner = p1 if winner_choice == "选手1胜" else p2
-                save_game(new_date, p1, p2, final_winner, note1, note2)
-                _, saved_weight = classify_event(note1)
-                st.success(
-                    f"已保存：{p1} vs {p2}（胜者：{final_winner}，v2 权重 {saved_weight:.1f}）"
-                )
-                st.rerun()
-    
-    st.divider()  # 加一条分割线
-    
-    # 新增：腾讯围棋抓取小工具
-    st.header("🛠 实用工具")
-    st.markdown("🔗 [转播大厅](https://go.7dm7va.top)")
-    with st.expander("📥 腾讯围棋棋谱抓取"):
-        st.caption("输入对局 ID 即可提取 SGF 文件")
-        cid = st.text_input("Chess ID", placeholder="如: 1770092663030101341")
-        if st.button("获取并准备下载"):
-            if cid:
-                with st.spinner("抓取中..."):
-                    sgf_text = fetch_txwq_content(cid.strip())
-                    if sgf_text:
-                        st.success("抓取成功！")
-                        # 提供下载按钮
-                        st.download_button(
-                            label="💾 点击下载 SGF",
-                            data=sgf_text,
-                            file_name=f"TXWQ_{cid}.sgf",
-                            mime="text/plain"
-                        )
-            else:
-                st.warning("请输入有效 ID")
 
 # ========== 实时排行 & 多人 Elo 走势 ==========
 # 榜单和走势图上下排列并各占整行，避免任何窗口宽度下互相挤压。
@@ -492,15 +385,40 @@ with col_rank:
                 display_df = display_df[display_df['Last_Active'] >= two_years_ago]
 
             if not display_df.empty:
-                # 使用我们自己的拼音排序 key 排
                 display_df['Name_sorted'] = display_df['Name'].apply(player_sort_key)
-
-                # 排序：先按等级分降序，再按拼音
                 display_df = display_df.sort_values(
                     by=['Rating', 'Name_sorted'],
                     ascending=[False, True]
                 ).reset_index(drop=True)
-                display_df.index += 1
+                display_df['Rank'] = range(1, len(display_df) + 1)
+                display_df['_Sortable_Change'] = display_df['Period_Change'].where(
+                    display_df['Period_Games'] > 0
+                )
+
+                view_mode = st.radio(
+                    "榜单视图",
+                    ["简洁榜单", "完整表格"],
+                    horizontal=True,
+                    key="rank_view_mode",
+                )
+                sort_mode = st.selectbox(
+                    "排序依据",
+                    ["等级分（高到低）", "近期涨分最多", "近期跌分最多", "近期对局最多"],
+                    key="rank_sort_mode",
+                )
+
+                sort_rules = {
+                    "等级分（高到低）": (['Rating', 'Name_sorted'], [False, True]),
+                    "近期涨分最多": (['_Sortable_Change', 'Rating'], [False, False]),
+                    "近期跌分最多": (['_Sortable_Change', 'Rating'], [True, False]),
+                    "近期对局最多": (['Period_Games', 'Rating'], [False, False]),
+                }
+                sort_columns, sort_ascending = sort_rules[sort_mode]
+                display_df = display_df.sort_values(
+                    sort_columns,
+                    ascending=sort_ascending,
+                    na_position='last',
+                )
 
                 # 处理勋章
                 def decorate_name(row):
@@ -515,52 +433,50 @@ with col_rank:
 
                 display_df['Name'] = display_df.apply(decorate_name, axis=1)
 
-                # 保留“变化”为数值，才能在点击表头时按真实涨跌排序。
-                # 箭头只负责显示，不参与排序；对局数也拆成独立列。
-                display_df = display_df[
-                    ['Name', 'Rating', 'Period_Change', 'Period_Games', 'Total_Games', 'Win_Rate']
+                table_df = display_df[
+                    ['Rank', 'Name', 'Rating', 'Period_Change', 'Period_Games', 'Total_Games', 'Win_Rate']
+                ].copy()
+                table_df.columns = [
+                    '排名', '选手', '等级分', '变化', '对局', '总局数', '总胜率'
                 ]
-                # 周期已在上方选择，表头保持简洁，避免在窄屏横向溢出。
+                table_df = table_df.set_index('排名')
+
+                if view_mode == "简洁榜单":
+                    table_df = table_df[['选手', '等级分', '变化', '对局']]
+                else:
+                    table_df = table_df[
+                        ['选手', '等级分', '变化', '对局', '总局数', '总胜率']
+                    ]
+
                 change_column = '变化'
-                games_column = '对局'
-                display_df.columns = [
-                    '选手', '等级分', change_column, games_column, '总局数', '总胜率'
-                ]
 
                 def format_change_cell(change):
-                    if pd.isna(change):
+                    if pd.isna(change) or float(change) == 0:
                         return '—'
                     change = float(change)
-                    if change == 0:
-                        return '—'
                     arrow = '↑' if change > 0 else '↓'
-                    return f"{arrow} {abs(int(change))}"
+                    return f"{arrow} {abs(int(round(change)))}"
 
-                # 着色：涨分绿、跌分红
                 def highlight_change(val):
                     if pd.notna(val):
                         if val > 0:
-                            return 'color: #16a34a;'  # 绿色
+                            return 'color: #16a34a;'
                         if val < 0:
-                            return 'color: #dc2626;'  # 红色
+                            return 'color: #dc2626;'
                     return ''
 
                 styled = (
-                    display_df.style
+                    table_df.style
                     .map(highlight_change, subset=[change_column])
                     .format({'等级分': '{:.0f}', change_column: format_change_cell}, na_rep='—')
                 )
-                # 不额外指定列配置：它会和 Styler 在部分 Streamlit 版本中
-                # 产生一列无内容的空白区域。简短表头会让表格按内容自然收紧。
                 safe_dataframe(styled)
                 st.caption(
-                    f"注：榜单仅显示总对局数 ≥ {threshold} 局的选手；"
-                    f"变化统计为{change_window_label}内的等级分涨跌；"
-                    f"对局列为该时段的实际对局数。"
+                    f"榜单显示总对局数 ≥ {threshold} 局的选手；"
+                    f"变化和对局均统计{change_window_label}。"
                 )
                 if rating_version == 'v2':
-                    st.caption("姓名后的“暂定 / 校准中”表示有效对局尚不足 30；没有标注的为稳定状态。")
-                st.caption("排序提示：变化列的 ↑ 表示从小到大（跌分最多在前）；再点一次变为 ↓，涨分最多在前。")
+                    st.caption("姓名后的“暂定 / 校准中”表示有效对局不足 30；没有标注的为稳定状态。")
             else:
                 st.info(f"暂无满足条件的选手（需对局 ≥ {threshold} 且在活跃期内）。")
         else:
@@ -571,12 +487,12 @@ with col_trend:
     st.divider()
     st.subheader("📈 历史走势")
     if not history_df.empty and not ratings == {}:
-        # 默认前 5 名
+        # 手机端默认只展示 3 人，减少标签和图例拥挤；仍可手动增加。
         top_players = [
             name
             for name, _ in sorted(
                 ratings.items(), key=lambda x: x[1], reverse=True
-            )[:5]
+            )[:3]
         ]
         selected = st.multiselect(
             "选择选手对比：",
@@ -607,7 +523,8 @@ st.divider()
 
 # ========== 选手详细档案 ==========
 st.subheader("🔍 选手详细档案")
-col_sel, col_stats = st.columns([1, 3])
+col_sel = st.container()
+col_stats = st.container()
 
 if "current_selected_player" not in st.session_state:
     st.session_state.current_selected_player = "(请选择)"
@@ -726,8 +643,8 @@ if target != "(请选择)":
     )[:TOP_N]
 
     with col_stats:
-        # 核心分数与可信状态放在第一行；生涯统计放在第二行。
-        m1, m2, m3, m4 = st.columns(4)
+        # 每行最多两个指标，手机上仍能清楚阅读。
+        m1, m2 = st.columns(2)
 
         # 在“当前等级分”下面加名次说明
         with m1:
@@ -738,6 +655,8 @@ if target != "(请选择)":
             st.metric("分数状态", current_status)
             st.caption(f"下一局个人 K 值：{next_k}")
 
+        m3, m4 = st.columns(2)
+
         with m3:
             effective_text = f"{effective_count:.1f}".rstrip("0").rstrip(".")
             st.metric("有效对局", f"{effective_text} 局")
@@ -746,7 +665,7 @@ if target != "(请选择)":
         with m4:
             st.metric("总对局数", f"{total_games} 局")
 
-        m5, m6, m7 = st.columns(3)
+        m5, m6 = st.columns(2)
 
         with m5:
             st.metric("巅峰等级分", peak_score, delta=peak_date)
@@ -759,8 +678,7 @@ if target != "(请选择)":
                 delta_color="inverse",
             )
 
-        with m7:
-            st.metric("总胜率", f"{win_rate:.1f}%")
+        st.metric("总胜率", f"{win_rate:.1f}%")
 
         # 荣誉徽章展示
         if player_badges:
@@ -770,7 +688,7 @@ if target != "(请选择)":
 
         st.divider()
 
-        c_rival, c_nemesis, c_prey = st.columns(3)
+        c_rival, c_nemesis, c_prey = st.tabs(["🤝 老对手", "☠️ 上手", "🍲 下手"])
 
         def format_list(data_list: list[dict]) -> str:
             if not data_list:
@@ -783,17 +701,15 @@ if target != "(请选择)":
             return "\n\n".join(lines)
 
         with c_rival:
-            st.markdown("#### 🤝 老对手（交手最多）")
+            st.caption("交手次数最多的 5 位对手")
             st.markdown(format_list(old_rivals))
 
         with c_nemesis:
-            st.markdown("#### ☠️ 上手（胜率最低）")
-            st.caption("*(仅统计对局数 ≥ 2，且胜率 < 50%)*")
+            st.caption("仅统计交手 ≥ 2 局且胜率低于 50% 的对手")
             st.markdown(format_list(nemesis))
 
         with c_prey:
-            st.markdown("#### 🍲 下手（胜率最高）")
-            st.caption("*(仅统计对局数 ≥ 2，且胜率 > 50%)*")
+            st.caption("仅统计交手 ≥ 2 局且胜率高于 50% 的对手")
             st.markdown(format_list(preys))
 
     st.divider()
@@ -820,7 +736,16 @@ if target != "(请选择)":
             ),
             axis=1,
         )
-        cols_to_show = ["日期", "对手", "赛果", "等级分变化", "赛后分", "计分参数", "赛事"]
+        games_view = st.radio(
+            "对局记录视图",
+            ["简洁记录", "计分详情"],
+            horizontal=True,
+            key="player_games_view",
+        )
+        if games_view == "简洁记录":
+            cols_to_show = ["日期", "对手", "赛果", "等级分变化"]
+        else:
+            cols_to_show = ["日期", "对手", "赛果", "等级分变化", "赛后分", "计分参数", "赛事"]
 
         def format_rating_change(change):
             if pd.isna(change) or abs(change) < 0.05:
@@ -845,35 +770,35 @@ if target != "(请选择)":
                 na_rep="—",
             )
         )
-        safe_dataframe(styled_games)
+        safe_dataframe(styled_games, hide_index=True)
     else:
         st.info("暂无对局记录")
 
 st.divider()
 
 # ========== 全公司完整对局记录 ==========
-st.subheader("📜 全公司完整对局记录")
-if not df.empty:
-    full_display = (
-        df.sort_values("Date", ascending=False)
-        .rename(
-            columns={
-                "Date": "日期",
-                "Player1": "选手1",
-                "Player2": "选手2",
-                "Winner": "获胜者",
-                "Note": "备注",
-            }
+with st.expander("📜 全公司完整对局记录", expanded=False):
+    if not df.empty:
+        full_display = (
+            df.sort_values("Date", ascending=False)
+            .rename(
+                columns={
+                    "Date": "日期",
+                    "Player1": "选手1",
+                    "Player2": "选手2",
+                    "Winner": "获胜者",
+                    "Note": "备注",
+                }
+            )
+            .copy()
         )
-        .copy()
-    )
-    full_display["日期"] = pd.to_datetime(full_display["日期"]).dt.strftime(
-        "%Y-%m-%d"
-    )
-    cols_to_show = ["日期", "选手1", "选手2", "获胜者", "备注"]
-    safe_dataframe(full_display[cols_to_show], height=500)
-else:
-    st.info("目前还没有任何对局记录。")
+        full_display["日期"] = pd.to_datetime(full_display["日期"]).dt.strftime(
+            "%Y-%m-%d"
+        )
+        cols_to_show = ["日期", "选手1", "选手2", "获胜者", "备注"]
+        safe_dataframe(full_display[cols_to_show], height=500, hide_index=True)
+    else:
+        st.info("目前还没有任何对局记录。")
 
 # ========== 查询交手记录 ==========
 st.divider()
@@ -952,95 +877,6 @@ else:
             display_h2h["日期"] = pd.to_datetime(display_h2h["日期"]).dt.strftime(
                 "%Y-%m-%d"
             )
-            cols_to_show = ["日期", "选手1", "选手2", "获胜者", "备注"]
-            safe_dataframe(display_h2h[cols_to_show], height=400)
-
-# ========== 数据维护（最近 N 条记录） ==========
-st.divider()
-st.subheader("🛠 数据维护（最近对局记录）")
-
-if df.empty:
-    st.info("当前还没有任何对局记录。")
-else:
-    # 想只维护最近多少条，可以改这个数字
-    N_RECENT = 10
-
-    # 取最近 N 条对局（按日期倒序），保留原始索引，方便回写
-    recent = df.sort_values("Date", ascending=False).head(N_RECENT).copy()
-    recent = recent.reset_index().rename(columns={"index": "__row_id"})
-
-    # 准备展示用的 DataFrame
-    recent_display = recent[
-        ["__row_id", "Date", "Player1", "Player2", "Winner", "Note1", "Note2"]
-    ].copy()
-
-    # 重命名成中文列名，便于看
-    recent_display = recent_display.rename(
-        columns={
-            "Date": "日期",
-            "Player1": "选手1",
-            "Player2": "选手2",
-            "Winner": "获胜者",
-            "Note1": "备注1",
-            "Note2": "备注2",
-        }
-    )
-
-    # 增加一列“删除？”
-    recent_display["删除?"] = False
-
-    st.caption(f"仅展示最近 {len(recent_display)} 条对局，可在此修改字段或勾选删除。")
-    if hasattr(st, "data_editor"):
-        edited = st.data_editor(
-            recent_display,
-            num_rows="fixed",
-            hide_index=True,
-            key="data_maintain_editor",
-        )
-    else:
-        st.warning("当前运行环境不支持在线编辑（data_editor），请升级 Streamlit 后使用。")
-        edited = recent_display.copy()
-
-    if st.button("💾 保存上述修改到 data.csv"):
-        # 把中文列名映射回内部列名
-        internal = edited.rename(
-            columns={
-                "日期": "Date",
-                "选手1": "Player1",
-                "选手2": "Player2",
-                "获胜者": "Winner",
-                "备注1": "Note1",
-                "备注2": "Note2",
-                "删除?": "__delete",
-            }
-        ).copy()
-
-        # 遍历每一行，根据 __row_id 定位到原 df
-        to_drop_indices = []
-        for _, row in internal.iterrows():
-            row_id = int(row["__row_id"])
-            if row["__delete"]:
-                to_drop_indices.append(row_id)
-            else:
-                # 更新原始 df 中对应行的内容
-                df.loc[row_id, "Date"] = row["Date"]
-                df.loc[row_id, "Player1"] = row["Player1"]
-                df.loc[row_id, "Player2"] = row["Player2"]
-                df.loc[row_id, "Winner"] = row["Winner"]
-                df.loc[row_id, "Note1"] = row.get("Note1", "")
-                df.loc[row_id, "Note2"] = row.get("Note2", "")
-
-        # 统一删除需要删除的行
-        if to_drop_indices:
-            df = df.drop(index=to_drop_indices)
-
-        # 重新生成合并后的 Note 列（保持和前面逻辑一致）
-        df["Note1"] = df["Note1"].fillna("").astype(str)
-        df["Note2"] = df["Note2"].fillna("").astype(str)
-        df["Note"] = df["Note1"] + " | " + df["Note2"]
-
-        # 覆盖写回 data.csv
-        df.to_csv(FILE_PATH, index=False)
-
-        st.success("已将修改写入 data.csv，页面将刷新以应用最新数据。")
-        st.rerun()
+            # 两位选手已在上方明确，手机端只需显示日期、胜者和赛事。
+            cols_to_show = ["日期", "获胜者", "备注"]
+            safe_dataframe(display_h2h[cols_to_show], height=400, hide_index=True)
