@@ -125,6 +125,25 @@ def standardize_name(name: str) -> str:
     return str(name).strip()
 
 
+def count_recent_games(df: pd.DataFrame, start_date: pd.Timestamp) -> dict[str, int]:
+    """统计每位选手从指定日期起至今天参加的实际对局数。"""
+    if df is None or df.empty:
+        return {}
+
+    today = pd.Timestamp.now().normalize()
+    dates = pd.to_datetime(df["Date"], errors="coerce")
+    recent = df[(dates >= start_date) & (dates <= today)]
+    names = pd.concat([recent["Player1"], recent["Player2"]], ignore_index=True)
+    names = names.dropna().map(standardize_name)
+    names = names[(names != "") & (names.str.lower() != "nan")]
+    return {name: int(count) for name, count in names.value_counts().items()}
+
+
+def recent_activity_sort_key(name: str, game_counts: dict[str, int]):
+    """近一年对局数多者优先；局数相同时沿用拼音排序。"""
+    return (-int(game_counts.get(name, 0)), *player_sort_key(name))
+
+
 # --- 数据加载 / 保存 ---
 
 def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -245,6 +264,8 @@ st.title("Go Ratings & Stats 📊")
 
 # --- 读取数据 & 选择等级分规则 ---
 df = load_data()
+one_year_ago = pd.Timestamp.now().normalize() - pd.DateOffset(years=1)
+recent_game_counts = count_recent_games(df, one_year_ago)
 
 with st.expander("⚙️ 等级分规则与版本", expanded=False):
     rating_version_label = st.radio(
@@ -254,26 +275,35 @@ with st.expander("⚙️ 等级分规则与版本", expanded=False):
         horizontal=True,
         help="默认使用 v2；v1 仅用于查看规则升级前的结果。",
     )
-    st.markdown(
-        """
-        - **动态 K：** 有效对局少于 10 局用 48，10～不足 30 局用 40，30 局起用 28。
-        - **赛事权重：** 现场赛 1.0、预选赛 0.8、捉早杯/贺岁杯/菜鸡杯 0.5。
-        - **双方独立：** 每位棋手使用自己的 K 值，成熟棋手不会因遇到新人而一起剧烈波动。
-        """
+    rating_version = next(
+        version for version, label in VERSION_LABELS.items() if label == rating_version_label
     )
-    snapshot_path = os.path.join(BASE_DIR, "snapshots", "rating_v1_2026-09-08.csv")
-    if os.path.exists(snapshot_path):
-        with open(snapshot_path, "rb") as snapshot_file:
-            st.download_button(
-                "下载 v1 迁移快照",
-                data=snapshot_file.read(),
-                file_name=os.path.basename(snapshot_path),
-                mime="text/csv",
-            )
-
-rating_version = next(
-    version for version, label in VERSION_LABELS.items() if label == rating_version_label
-)
+    if rating_version == "v2":
+        st.markdown(
+            """
+            - **动态 K：** 有效对局少于 10 局用 48，10～不足 30 局用 40，30 局起用 28。
+            - **赛事权重：** 现场赛 1.0、预选赛 0.8、捉早杯/贺岁杯/菜鸡杯 0.5。
+            - **双方独立：** 每位棋手使用自己的 K 值，成熟棋手不会因遇到新人而一起剧烈波动。
+            """
+        )
+    else:
+        st.markdown(
+            """
+            - **统一初始分：** 所有选手都从 1500 分开始。
+            - **固定 K：** 不区分新老选手，双方每局都使用 K=32。
+            - **赛事等权：** 所有已登记对局的权重均为 1.0，不区分现场赛、预选赛或杯赛。
+            - **用途：** 仅用于查看规则升级前的旧榜单，不作为当前默认结果。
+            """
+        )
+        snapshot_path = os.path.join(BASE_DIR, "snapshots", "rating_v1_2026-09-08.csv")
+        if os.path.exists(snapshot_path):
+            with open(snapshot_path, "rb") as snapshot_file:
+                st.download_button(
+                    "下载 v1 迁移快照",
+                    data=snapshot_file.read(),
+                    file_name=os.path.basename(snapshot_path),
+                    mime="text/csv",
+                )
 
 rating_result = calculate_rating_result(df, version=rating_version)
 ratings = rating_result.ratings
@@ -312,10 +342,14 @@ with col_rank:
         # “上一局涨跌”会在很久不下棋后仍然显示，容易被误读成近况。
         # 因此这里按选定时间段，计算期末等级分相对期初的变化。
         change_window_days = {
-            '近三个月': 90,
             '近半年': 180,
             '近一年': 365,
         }
+        if (
+            'rank_change_window' in st.session_state
+            and st.session_state['rank_change_window'] not in change_window_days
+        ):
+            del st.session_state['rank_change_window']
         change_window_label = st.selectbox(
             '变化周期',
             options=list(change_window_days),
@@ -530,14 +564,18 @@ if "current_selected_player" not in st.session_state:
     st.session_state.current_selected_player = "(请选择)"
 
 with col_sel:
-    # 使用自定义的按姓氏拼音排序，英文名排最后
-    sorted_players = sorted(list(ratings.keys()), key=player_sort_key)
+    # 近期更活跃的选手优先；活跃度相同时再按拼音排序。
+    sorted_players = sorted(
+        list(ratings.keys()),
+        key=lambda name: recent_activity_sort_key(name, recent_game_counts),
+    )
 
     target = st.selectbox(
         "选择选手查看详情：",
         ["(请选择)"] + sorted_players,
         key="current_selected_player",
     )
+    st.caption("按近1年对局数从多到少排列；对局数相同时按拼音排列。")
 
 if target != "(请选择)":
     # 基础数据
@@ -819,9 +857,14 @@ else:
         if name and str(name).strip().lower() != "nan"
     ]
 
-    # 使用和选手档案相同的排序规则：中文按姓氏拼音，英文放最后
-    all_players_sorted = sorted(cleaned_players, key=player_sort_key)
+    # 使用和选手档案相同的排序规则：近期活跃度优先，其次按拼音。
+    all_players_sorted = sorted(
+        cleaned_players,
+        key=lambda name: recent_activity_sort_key(name, recent_game_counts),
+    )
     player_options = ["(请选择)"] + all_players_sorted
+
+    st.caption("按近1年对局数从多到少排列；对局数相同时按拼音排列。")
 
     col_a, col_b = st.columns(2)
     with col_a:
