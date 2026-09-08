@@ -6,6 +6,15 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from rating_system import (
+    STATUS_STABLE,
+    VERSION_LABELS,
+    calculate_ratings as calculate_rating_result,
+    classify_event,
+    k_factor_for,
+    rating_status,
+)
+
 # 可选：按中文拼音排序
 try:
     from pypinyin import lazy_pinyin  # 需要在 requirements.txt 里加 pypinyin
@@ -52,16 +61,16 @@ def safe_dataframe(data, height=None, **extra_kwargs):
     if height is not None:
         kwargs["height"] = height
     try:
-        st.dataframe(data, use_container_width=True, **kwargs)
+        st.dataframe(data, width="stretch", **kwargs)
     except TypeError:
-        st.dataframe(data, **kwargs)
+        st.dataframe(data, use_container_width=True, **kwargs)
 
 def safe_altair_chart(chart):
     """Altair chart compat across old/new versions."""
     try:
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
     except TypeError:
-        st.altair_chart(chart)
+        st.altair_chart(chart, use_container_width=True)
 
 # ===============================
 # 基础配置
@@ -117,19 +126,6 @@ def standardize_name(name: str) -> str:
     if name is None:
         return ""
     return str(name).strip()
-
-
-# --- Elo 相关 ---
-
-def calculate_expected_score(rating_a: float, rating_b: float) -> float:
-    return 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
-
-
-def update_elo(rating_winner: float, rating_loser: float, k: int = 32) -> tuple[float, float]:
-    expected_winner = calculate_expected_score(rating_winner, rating_loser)
-    new_rating_winner = rating_winner + k * (1 - expected_winner)
-    new_rating_loser = rating_loser + k * (0 - expected_winner)
-    return new_rating_winner, new_rating_loser
 
 
 # --- 数据加载 / 保存 ---
@@ -210,108 +206,6 @@ def save_game(date, p1, p2, winner, note1, note2) -> None:
     new_row.to_csv(FILE_PATH, mode="a", header=header, index=False)
 
 
-# --- Elo 计算与历史 ---
-
-def calculate_ratings(
-    df: pd.DataFrame,
-    initial_rating: int = 1500,
-    k_factor: int = 32,
-) -> tuple[dict, dict, pd.DataFrame]:
-    """
-    根据对局记录计算：
-    - ratings: {name -> rating}
-    - last_active: {name -> 最近一局时间}
-    - history_df: 每一局后的历史 Elo（给折线图 / 选手极值用）
-    """
-    history_columns = [
-        "Game_ID", "Date", "Name", "Rating_Before", "Rating", "Rating_Change",
-        "Opponent", "Result", "Note1", "Note2",
-    ]
-
-    if df is None or df.empty:
-        return {}, {}, pd.DataFrame(columns=history_columns)
-
-    ratings: dict[str, float] = {}
-    last_active: dict[str, pd.Timestamp] = {}
-    history: list[dict] = []
-
-    # 先按日期排序，保证 Elo 时间顺序正确
-    df_sorted = df.sort_values("Date")
-
-    for game_id, row in df_sorted.iterrows():
-        p1 = standardize_name(row.get("Player1"))
-        p2 = standardize_name(row.get("Player2"))
-        winner = standardize_name(row.get("Winner"))
-        date = row.get("Date")
-
-        # 数据不完整的直接跳过
-        if not p1 or not p2 or not winner:
-            continue
-        if winner not in (p1, p2):
-            # Winner 字段写错的对局也跳过，避免把 Elo 搞乱
-            continue
-
-        # 自动初始化等级分
-        if p1 not in ratings:
-            ratings[p1] = initial_rating
-        if p2 not in ratings:
-            ratings[p2] = initial_rating
-
-        last_active[p1] = date
-        last_active[p2] = date
-
-        loser = p2 if winner == p1 else p1
-
-        r_w = ratings[winner]
-        r_l = ratings[loser]
-
-        e_w = calculate_expected_score(r_w, r_l)
-        e_l = 1 - e_w
-
-        new_r_w = r_w + k_factor * (1 - e_w)
-        new_r_l = r_l + k_factor * (0 - e_l)
-
-        ratings[winner] = new_r_w
-        ratings[loser] = new_r_l
-
-        note1 = row.get("Note1", "")
-        note2 = row.get("Note2", "")
-
-        # 记录胜者
-        history.append(
-            {
-                "Game_ID": game_id,
-                "Date": date,
-                "Name": winner,
-                "Rating_Before": r_w,
-                "Rating": new_r_w,
-                "Rating_Change": new_r_w - r_w,
-                "Opponent": loser,
-                "Result": "Win",
-                "Note1": note1,
-                "Note2": note2,
-            }
-        )
-        # 记录负者
-        history.append(
-            {
-                "Game_ID": game_id,
-                "Date": date,
-                "Name": loser,
-                "Rating_Before": r_l,
-                "Rating": new_r_l,
-                "Rating_Change": new_r_l - r_l,
-                "Opponent": winner,
-                "Result": "Loss",
-                "Note1": note1,
-                "Note2": note2,
-            }
-        )
-
-    history_df = pd.DataFrame(history, columns=history_columns)
-    return ratings, last_active, history_df
-
-
 def get_rival_analysis(player_name: str, df: pd.DataFrame) -> list[dict]:
     """返回选手对手统计（总局数 / 胜率等）。"""
     if df is None or df.empty or not player_name:
@@ -372,9 +266,48 @@ def fetch_txwq_content(chessid: str):
 st.set_page_config(page_title="公司围棋大脑", layout="wide")
 st.title("Go Ratings & Stats 📊")
 
-# --- 读取数据 & 计算 Elo ---
+# --- 读取数据 & 选择等级分规则 ---
 df = load_data()
-ratings, last_active, history_df = calculate_ratings(df)
+
+st.sidebar.header("⚙️ 等级分规则")
+rating_version_label = st.sidebar.radio(
+    "计算版本",
+    options=list(VERSION_LABELS.values()),
+    index=0,
+    help="默认使用 v2；v1 仅用于查看规则升级前的结果。",
+)
+rating_version = next(
+    version for version, label in VERSION_LABELS.items() if label == rating_version_label
+)
+
+with st.sidebar.expander("查看 v2 规则", expanded=False):
+    st.markdown(
+        """
+        - **动态 K：** 有效对局少于 10 局用 48，10～不足 30 局用 40，30 局起用 28。
+        - **赛事权重：** 现场赛 1.0、预选赛 0.8、捉早杯/贺岁杯/菜鸡杯 0.5。
+        - **双方独立：** 每位棋手使用自己的 K 值，成熟棋手不会因遇到新人而一起剧烈波动。
+        """
+    )
+    snapshot_path = os.path.join(BASE_DIR, "snapshots", "rating_v1_2026-09-08.csv")
+    if os.path.exists(snapshot_path):
+        with open(snapshot_path, "rb") as snapshot_file:
+            st.download_button(
+                "下载 v1 迁移快照",
+                data=snapshot_file.read(),
+                file_name=os.path.basename(snapshot_path),
+                mime="text/csv",
+            )
+
+rating_result = calculate_rating_result(df, version=rating_version)
+ratings = rating_result.ratings
+last_active = rating_result.last_active
+history_df = rating_result.history
+effective_games = rating_result.effective_games
+st.caption(
+    "当前采用：**动态 K + 赛事权重（v2）**。可在左侧切换旧规则对照。"
+    if rating_version == "v2"
+    else "当前正在查看：**v1 旧规则**。这是对照视图，不是默认榜单。"
+)
 
 # 动态获选手名单（仅根据出现过的双方）
 # 先用 standardize_name 清洗，再用中文拼音 + 英文在后的规则排序
@@ -419,6 +352,7 @@ with st.sidebar:
         winner_choice = st.radio("胜者", ["选手1胜", "选手2胜"], horizontal=True)
 
         note1 = st.text_input("赛事名称 (Note1)", placeholder="例如：12届腾赛")
+        st.caption("v2 自动识别现场赛、预选赛及三类杯赛；未识别赛事会保留记录，但不计等级分。")
         note2 = st.text_input("轮次 (Note2)", placeholder="例如：第一轮")
 
         submitted = st.form_submit_button("提交")
@@ -429,7 +363,10 @@ with st.sidebar:
             else:
                 final_winner = p1 if winner_choice == "选手1胜" else p2
                 save_game(new_date, p1, p2, final_winner, note1, note2)
-                st.success(f"已保存：{p1} vs {p2}（胜者：{final_winner}）")
+                _, saved_weight = classify_event(note1)
+                st.success(
+                    f"已保存：{p1} vs {p2}（胜者：{final_winner}，v2 权重 {saved_weight:.1f}）"
+                )
                 st.rerun()
     
     st.divider()  # 加一条分割线
@@ -457,8 +394,9 @@ with st.sidebar:
                 st.warning("请输入有效 ID")
 
 # ========== 实时排行 & 多人 Elo 走势 ==========
-# 排行榜包含多列数据，适当扩大它的展示宽度，避免横向滚动。
-col_rank, col_trend = st.columns([2, 3])
+# 榜单和走势图上下排列并各占整行，避免任何窗口宽度下互相挤压。
+col_rank = st.container()
+col_trend = st.container()
 
 with col_rank:
     st.subheader("🏆 实时排行 (Top Ratings)")
@@ -518,8 +456,10 @@ with col_rank:
         for p, r in ratings.items():
             rank_data.append({
                 'Name': p,
-                'Rating': int(r),
-                'Last_Active': last_active.get(p)
+                'Rating': float(r),
+                'Last_Active': last_active.get(p),
+                'Effective_Games': float(effective_games.get(p, 0)),
+                'Rating_Status': rating_status(effective_games.get(p, 0)) if rating_version == 'v2' else '旧版',
             })
         rank_df = pd.DataFrame(rank_data)
 
@@ -566,9 +506,12 @@ with col_rank:
                 def decorate_name(row):
                     wins = int(row.get('Win_Count', 0) or 0)
                     badges = build_badges(row['Name'], wins)
-                    if not badges:
+                    suffixes = list(badges)
+                    if rating_version == 'v2' and row['Rating_Status'] != STATUS_STABLE:
+                        suffixes.append(row['Rating_Status'])
+                    if not suffixes:
                         return row['Name']
-                    return f"{row['Name']}  {' · '.join(badges)}"
+                    return f"{row['Name']}  {' · '.join(suffixes)}"
 
                 display_df['Name'] = display_df.apply(decorate_name, axis=1)
 
@@ -605,7 +548,7 @@ with col_rank:
                 styled = (
                     display_df.style
                     .map(highlight_change, subset=[change_column])
-                    .format({change_column: format_change_cell}, na_rep='—')
+                    .format({'等级分': '{:.0f}', change_column: format_change_cell}, na_rep='—')
                 )
                 # 不额外指定列配置：它会和 Styler 在部分 Streamlit 版本中
                 # 产生一列无内容的空白区域。简短表头会让表格按内容自然收紧。
@@ -615,6 +558,8 @@ with col_rank:
                     f"变化统计为{change_window_label}内的等级分涨跌；"
                     f"对局列为该时段的实际对局数。"
                 )
+                if rating_version == 'v2':
+                    st.caption("姓名后的“暂定 / 校准中”表示有效对局尚不足 30；没有标注的为稳定状态。")
                 st.caption("排序提示：变化列的 ↑ 表示从小到大（跌分最多在前）；再点一次变为 ↓，涨分最多在前。")
             else:
                 st.info(f"暂无满足条件的选手（需对局 ≥ {threshold} 且在活跃期内）。")
@@ -623,6 +568,7 @@ with col_rank:
 
 
 with col_trend:
+    st.divider()
     st.subheader("📈 历史走势")
     if not history_df.empty and not ratings == {}:
         # 默认前 5 名
@@ -685,6 +631,9 @@ if target != "(请选择)":
     wins = len(my_games[my_games["Winner"] == target])
     win_rate = (wins / total_games * 100) if total_games > 0 else 0.0
     curr_score = int(round(ratings.get(target, 1500)))
+    effective_count = float(effective_games.get(target, 0))
+    current_status = rating_status(effective_count) if rating_version == "v2" else "旧版"
+    next_k = k_factor_for(effective_count) if rating_version == "v2" else 32
 
     # 当前选手的荣誉徽章
     player_badges = build_badges(target, wins)
@@ -777,8 +726,8 @@ if target != "(请选择)":
     )[:TOP_N]
 
     with col_stats:
-        # 5 个指标
-        m1, m2, m3, m4, m5 = st.columns(5)
+        # 核心分数与可信状态放在第一行；生涯统计放在第二行。
+        m1, m2, m3, m4 = st.columns(4)
 
         # 在“当前等级分”下面加名次说明
         with m1:
@@ -786,9 +735,23 @@ if target != "(请选择)":
             st.caption(rank_text)
 
         with m2:
-            st.metric("巅峰等级分", peak_score, delta=peak_date)
+            st.metric("分数状态", current_status)
+            st.caption(f"下一局个人 K 值：{next_k}")
 
         with m3:
+            effective_text = f"{effective_count:.1f}".rstrip("0").rstrip(".")
+            st.metric("有效对局", f"{effective_text} 局")
+            st.caption("已按赛事重要性折算")
+
+        with m4:
+            st.metric("总对局数", f"{total_games} 局")
+
+        m5, m6, m7 = st.columns(3)
+
+        with m5:
+            st.metric("巅峰等级分", peak_score, delta=peak_date)
+
+        with m6:
             st.metric(
                 "最低等级分",
                 low_score,
@@ -796,10 +759,7 @@ if target != "(请选择)":
                 delta_color="inverse",
             )
 
-        with m4:
-            st.metric("总对局数", f"{total_games} 局")
-
-        with m5:
+        with m7:
             st.metric("总胜率", f"{win_rate:.1f}%")
 
         # 荣誉徽章展示
@@ -841,26 +801,26 @@ if target != "(请选择)":
     # 个人完整对局记录
     st.markdown(f"#### 📜 {target} 完整对局记录")
     if not my_games.empty:
-        # history_df 每局都带原始 CSV 行号（Game_ID），因此即使同一天有多局，
-        # 也能准确合并到该选手的这一局等级分涨跌。
-        my_rating_changes = (
-            history_df[history_df["Name"] == target]
-            .set_index("Game_ID")[["Rating_Change"]]
-        )
-        display_games = my_games.join(my_rating_changes, how="left").rename(
-            columns={
-                "Date": "日期",
-                "Player1": "选手1",
-                "Player2": "选手2",
-                "Winner": "获胜者",
-                "Rating_Change": "等级分变化",
-                "Note": "备注",
-            }
+        # 详情只保留个人视角所需信息，避免重复显示选手1/选手2/获胜者。
+        display_games = my_history.sort_values(
+            ["Date", "Game_ID"], ascending=[False, False]
         ).copy()
-        display_games["日期"] = pd.to_datetime(display_games["日期"]).dt.strftime(
-            "%Y-%m-%d"
+        display_games["日期"] = pd.to_datetime(display_games["Date"]).dt.strftime("%Y-%m-%d")
+        display_games["对手"] = display_games["Opponent"]
+        display_games["赛果"] = display_games["Result"].map({"Win": "胜", "Loss": "负"})
+        display_games["等级分变化"] = display_games["Rating_Change"]
+        display_games["赛后分"] = display_games["Rating"]
+        display_games["计分参数"] = display_games.apply(
+            lambda row: f"K{int(row['K_Factor'])} × {row['Event_Weight']:.1f}", axis=1
         )
-        cols_to_show = ["日期", "选手1", "选手2", "获胜者", "等级分变化", "备注"]
+        display_games["赛事"] = display_games.apply(
+            lambda row: " · ".join(
+                part for part in (str(row.get("Note1", "")).strip(), str(row.get("Note2", "")).strip())
+                if part and part.lower() != "nan"
+            ),
+            axis=1,
+        )
+        cols_to_show = ["日期", "对手", "赛果", "等级分变化", "赛后分", "计分参数", "赛事"]
 
         def format_rating_change(change):
             if pd.isna(change) or abs(change) < 0.05:
@@ -880,7 +840,10 @@ if target != "(请选择)":
         styled_games = (
             display_games[cols_to_show].style
             .map(highlight_rating_change, subset=["等级分变化"])
-            .format({"等级分变化": format_rating_change}, na_rep="—")
+            .format(
+                {"等级分变化": format_rating_change, "赛后分": "{:.0f}"},
+                na_rep="—",
+            )
         )
         safe_dataframe(styled_games)
     else:
