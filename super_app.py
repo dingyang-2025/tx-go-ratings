@@ -342,6 +342,7 @@ with col_rank:
         # “上一局涨跌”会在很久不下棋后仍然显示，容易被误读成近况。
         # 因此这里按选定时间段，计算期末等级分相对期初的变化。
         change_window_days = {
+            '近三天': 3,
             '近半年': 180,
             '近一年': 365,
         }
@@ -353,7 +354,7 @@ with col_rank:
         change_window_label = st.selectbox(
             '变化周期',
             options=list(change_window_days),
-            index=1,
+            index=2,
             key='rank_change_window',
         )
         period_days = change_window_days[change_window_label]
