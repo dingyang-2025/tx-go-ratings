@@ -19,6 +19,10 @@ except ImportError:
     lazy_pinyin = None
 
 
+# 排行榜的最低总对局门槛。活跃筛选会进一步排除长期不下的选手。
+RANKING_MIN_GAMES = 5
+
+
 def player_sort_key(name: str):
     """
     选手排序规则：
@@ -410,7 +414,7 @@ with col_rank:
             full_df['Period_Change'] = full_df['Period_Change'].fillna(0)
 
             # 只统计总局数 ≥ threshold 的选手
-            threshold = 15
+            threshold = RANKING_MIN_GAMES
             display_df = full_df[full_df['Total_Games'] >= threshold].copy()
 
             # 活跃筛选：近 2 年
@@ -607,9 +611,9 @@ if target != "(请选择)":
         peak_score = low_score = curr_score
         peak_date = low_date = "N/A"
 
-    # ===== 1）计算名次：在总对局 ≥ 15 局选手中的等级分排名 =====
+    # ===== 1）计算名次：在达到排行榜最低对局门槛的选手中的等级分排名 =====
     rank_text = "名次：—"
-    threshold_rank = 15
+    threshold_rank = RANKING_MIN_GAMES
     if not history_df.empty:
         # 每个选手的总局数
         stats_by_player = history_df.groupby("Name").agg(
